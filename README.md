@@ -47,6 +47,8 @@
 
 升级：改版本号后重复第 3 步。
 
+**Cursor 内置 webSearch / webFetch 进 run.stream()**：原版 `@cursor/sdk` 把这两种 tool call `return null` 丢掉。本插件锁定 SDK 版本，`postinstall` 在安装时就地改 SDK 的 ESM 构建（只改这两个 case，版本不符或代码变动时只警告不报错）。profile 无需额外配置，只要 `allowBuilds` 里有 `cursor-to-dsh`（`prepare` 本来就需要）。
+
 ### 填 API Key（支持多把）— 用配置页，不要手写 yaml
 
 在 [cursor.com/dashboard](https://cursor.com/dashboard) → API Keys → New API Key 创建（个人 key 或 service account key，不支持 Team Admin key）。
@@ -123,7 +125,7 @@
 ## 开发
 
 ```bash
-npm install && npm run build   # DSH 加载的是 lib/，改源码后要重新 build 并重启 DSH
+pnpm install && npm run build  # 用 pnpm 12（postinstall 会 patch @cursor/sdk）；DSH 加载的是 lib/，改源码后要重新 build 并重启 DSH
 npm test                       # 假 Cursor agent 的单测
 npm run check                  # 类型检查
 npm run check:public           # 推 GitHub / 发 npm 前：不含内网链接和本机路径
