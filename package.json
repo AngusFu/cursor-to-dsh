@@ -37,8 +37,8 @@
     "lib",
     "src",
     "client",
+    "scripts/patch-cursor-sdk.mjs",
     "cordis.patch.yml",
-    "patches",
     "tsconfig.build.json"
   ],
   "dsh": {
@@ -62,6 +62,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/copy-client.mjs",
     "prepare": "npm run build",
+    "postinstall": "node scripts/patch-cursor-sdk.mjs",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "check": "tsc --noEmit",
     "check:public": "node scripts/check-public.mjs",

@@ -47,14 +47,7 @@
 
 升级：改版本号后重复第 3 步。
 
-**可选：让 Cursor 内置 webSearch / webFetch 进 run.stream()**。本仓库用 pnpm 锁定并 patch 了 `@cursor/sdk`（原版把这两种 tool call `return null` 丢掉）。`patchedDependencies` 只对正在安装的项目生效，所以 profile 要自己声明：把 `node_modules/cursor-to-dsh/patches/@cursor__sdk@1.3.1.patch` 复制到 profile 的 `patches/`，在 profile 的 `pnpm-workspace.yaml` 里加：
-
-```yaml
-patchedDependencies:
-  '@cursor/sdk@1.3.1': patches/@cursor__sdk@1.3.1.patch
-```
-
-然后重新 `pnpm install`。插件版本和 SDK 版本对不上时 pnpm 会报错，按新版本的 patch 文件名改。
+**Cursor 内置 webSearch / webFetch 进 run.stream()**：原版 `@cursor/sdk` 把这两种 tool call `return null` 丢掉。本插件锁定 SDK 版本，`postinstall` 在安装时就地改 SDK 的 ESM 构建（只改这两个 case，版本不符或代码变动时只警告不报错）。profile 无需额外配置，只要 `allowBuilds` 里有 `cursor-to-dsh`（`prepare` 本来就需要）。
 
 ### 填 API Key（支持多把）— 用配置页，不要手写 yaml
 

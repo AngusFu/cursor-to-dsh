@@ -1,67 +1,112 @@
 #!/usr/bin/env node
 /**
- * Re-applies the cursor-to-dsh edits to an unpacked @cursor/sdk directory (the one
- * `pnpm patch @cursor/sdk@<version>` prints). The SDK's run.stream() converter drops
- * webSearchToolCall / webFetchToolCall with `return null`; this makes them emit
- * `tool_call` messages named `webSearch` / `webFetch`, shaped like semSearch / mcp.
+ * postinstall: make @cursor/sdk's run.stream() emit Cursor's built-in webSearch / webFetch tool calls.
  *
- * Usage: node scripts/patch-cursor-sdk.mjs <sdk-dir>  then  pnpm patch-commit <sdk-dir>
- * Fails loudly if an anchor is missing or ambiguous: re-read the minified switch then.
+ * The SDK's tool-call converter maps webSearchToolCall / webFetchToolCall to `return null`, so they
+ * never reach run.stream(). This rewrites those two cases in the ESM build (what DSH loads through
+ * `import("@cursor/sdk")`) to emit `{ type: "webSearch" | "webFetch", args, result }`, shaped like
+ * semSearch / mcp. Applied in place at install time instead of a committed diff: the minified chunk
+ * is one ~1.3 MB line, so any unified diff of it is megabytes.
+ *
+ * Only touches the exact SDK version pinned in package.json; idempotent; never fails the install
+ * (prints a warning instead). Replaces the file via rename so a hardlinked package store is not mutated.
+ *
+ *   node scripts/patch-cursor-sdk.mjs            # patch the @cursor/sdk this package resolves
+ *   node scripts/patch-cursor-sdk.mjs <sdk-dir>  # patch an explicit unpacked SDK directory
+ *   node scripts/patch-cursor-sdk.mjs --check    # exit 1 unless the resolved SDK is patched
  */
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const dir = process.argv[2];
-if (!dir) throw new Error("usage: patch-cursor-sdk.mjs <unpacked @cursor/sdk dir>");
+const MARK = "/*cursor-to-dsh:web-tools*/";
 
-// Result mappers shared by both builds; `R` is the proto result message.
+// Result mappers; `R` is the proto result message ({ result: { case, value } }).
 const searchResult = (R) =>
   `(()=>{const c=${R}.result?.case;return"success"===c?{status:"success",value:{references:(${R}.result.value.references??[]).map((x=>({title:x.title,url:x.url,chunk:x.chunk})))}}:"error"===c?{status:"error",error:${R}.result.value.error}:"rejected"===c?{status:"error",error:${R}.result.value.reason}:void 0})()`;
 const fetchResult = (R) =>
   `(()=>{const c=${R}.result?.case;return"success"===c?{status:"success",value:{url:${R}.result.value.url,markdown:${R}.result.value.markdown}}:"error"===c?{status:"error",error:${R}.result.value.error}:"rejected"===c?{status:"error",error:${R}.result.value.reason}:void 0})()`;
+// `v` is the switch subject, the same name the minifier gave the surrounding converter.
+const searchCase = (v) =>
+  `${MARK}case"webSearchToolCall":{const{args:a,result:r}=${v}.tool.value;return a?{type:"webSearch",args:{searchTerm:a.searchTerm},...r?{result:${searchResult("r")}}:{}}:null}`;
+const fetchCase = (v) =>
+  `case"webFetchToolCall":{const{args:a,result:r}=${v}.tool.value;return a?{type:"webFetch",args:{url:a.url},...r?{result:${fetchResult("r")}}:{}}:null}`;
 
-// cjs/esm chunk: switch on `e`, cases fall through to a shared `return null`.
-const splitSearch = `case"webSearchToolCall":{const{args:t,result:r}=e.tool.value;return t?{type:"webSearch",args:{searchTerm:t.searchTerm},...r?{result:${searchResult("r")}}:{}}:null}`;
-const splitFetch = `case"webFetchToolCall":{const{args:t,result:r}=e.tool.value;return t?{type:"webFetch",args:{url:t.url},...r?{result:${fetchResult("r")}}:{}}:null}`;
-// bundled (bun) build: switch on `$`, every case has its own `return null`.
-const bunSearch = `case"webSearchToolCall":{let{args:A,result:B}=$.tool.value;if(!A)return null;return{type:"webSearch",args:{searchTerm:A.searchTerm},...B?{result:${searchResult("B")}}:{}}}`;
-const bunFetch = `case"webFetchToolCall":{let{args:A,result:B}=$.tool.value;if(!A)return null;return{type:"webFetch",args:{url:A.url},...B?{result:${fetchResult("B")}}:{}}}`;
+const HEAD = /function(?: [\w$]+)?\(([\w$]+)\)\{if\(!\1\?\.tool\)return null;switch\(\1\.tool\.case\)\{/;
 
 function once(text, from, to, file) {
   const n = text.split(from).length - 1;
-  if (n !== 1) throw new Error(`${file}: expected 1 match of ${JSON.stringify(from.slice(0, 60))}, got ${n}`);
+  if (n !== 1) throw new Error(`${file}: expected 1 match of ${JSON.stringify(from)}, got ${n}`);
   return text.replace(from, () => to);
 }
 
-function patchSplit(file) {
-  let t = readFileSync(file, "utf8");
-  t = once(t, 'case"readTodosToolCall":case"webSearchToolCall":', splitSearch + 'case"readTodosToolCall":', file);
+/** Returns "patched" | "already". Throws when the minified anchors moved. */
+export function patchSource(text, file = "chunk") {
+  if (text.includes(MARK)) return { text, state: "already" };
+  const head = HEAD.exec(text);
+  if (!head) throw new Error(`${file}: tool-call converter not found`);
+  const v = head[1];
+  let t = once(text, 'case"readTodosToolCall":case"webSearchToolCall":', searchCase(v) + 'case"readTodosToolCall":', file);
   t = once(t, 'case"truncatedToolCall":case"webFetchToolCall":', 'case"truncatedToolCall":', file);
-  t = once(t, 'case"applyAgentDiffToolCall":', splitFetch + 'case"applyAgentDiffToolCall":', file);
-  writeFileSync(file, t);
+  t = once(t, 'case"applyAgentDiffToolCall":', fetchCase(v) + 'case"applyAgentDiffToolCall":', file);
+  return { text: t, state: "patched" };
 }
 
-function patchBundled(file) {
-  let t = readFileSync(file, "utf8");
-  t = once(t, 'case"webSearchToolCall":return null;', bunSearch, file);
-  t = once(t, 'case"webFetchToolCall":return null;', bunFetch, file);
-  writeFileSync(file, t);
-}
-
-const chunkWith = (sub) => {
-  const hits = readdirSync(join(dir, "dist", sub))
+/** The dist/esm chunk holding the converter. */
+export function esmChunk(sdkDir) {
+  const dir = join(sdkDir, "dist", "esm");
+  const hits = readdirSync(dir)
     .filter((f) => f.endsWith(".js"))
-    .map((f) => join(dir, "dist", sub, f))
+    .map((f) => join(dir, f))
     .filter((f) => readFileSync(f, "utf8").includes('case"webSearchToolCall"'));
-  if (hits.length !== 1) throw new Error(`dist/${sub}: expected one chunk with webSearchToolCall, got ${hits.length}`);
+  if (hits.length !== 1) throw new Error(`${dir}: expected one chunk with webSearchToolCall, got ${hits.length}`);
   return hits[0];
-};
+}
 
-const targets = [chunkWith("cjs"), chunkWith("esm")];
-for (const f of targets) patchSplit(f);
-patchBundled(join(dir, "dist", "bundled", "index.js"));
-for (const f of [...targets, join(dir, "dist", "bundled", "index.js")]) {
-  const t = readFileSync(f, "utf8");
-  if (!t.includes('type:"webSearch"') || !t.includes('type:"webFetch"')) throw new Error(`${f}: patch did not land`);
-  console.log(`patched ${f.slice(dir.length + 1)}`);
+export function resolveSdkDir(from = import.meta.url) {
+  // exports has no "./package.json"; "." resolves to dist/cjs/index.js under require.
+  return dirname(dirname(dirname(createRequire(from).resolve("@cursor/sdk"))));
+}
+
+function main(argv) {
+  const here = dirname(dirname(fileURLToPath(import.meta.url)));
+  const pinned = JSON.parse(readFileSync(join(here, "package.json"), "utf8")).dependencies?.["@cursor/sdk"];
+  const check = argv.includes("--check");
+  const explicit = argv.find((a) => !a.startsWith("--"));
+  let sdkDir;
+  try {
+    sdkDir = explicit ?? resolveSdkDir();
+  } catch {
+    console.warn("[cursor-to-dsh] @cursor/sdk not resolvable; skipping web-tools patch");
+    return check ? 1 : 0;
+  }
+  const version = JSON.parse(readFileSync(join(sdkDir, "package.json"), "utf8")).version;
+  if (version !== pinned) {
+    console.warn(`[cursor-to-dsh] @cursor/sdk ${version} != pinned ${pinned}; web-tools patch not applied`);
+    return check ? 1 : 0;
+  }
+  const file = esmChunk(sdkDir);
+  const { text, state } = patchSource(readFileSync(file, "utf8"), file);
+  if (check) {
+    console.log(`[cursor-to-dsh] ${file}: ${state === "already" ? "patched" : "NOT patched"}`);
+    return state === "already" ? 0 : 1;
+  }
+  if (state === "patched") {
+    const tmp = `${file}.cursor-to-dsh.tmp`;
+    writeFileSync(tmp, text);
+    renameSync(tmp, file);
+  }
+  console.log(`[cursor-to-dsh] @cursor/sdk ${version} web-tools patch: ${state} (${file.slice(sdkDir.length + 1)})`);
+  return 0;
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  try {
+    process.exitCode = main(process.argv.slice(2));
+  } catch (err) {
+    // Never break the host install; the plugin works unpatched (web tool calls just stay invisible).
+    console.warn(`[cursor-to-dsh] web-tools patch skipped: ${err instanceof Error ? err.message : err}`);
+    if (process.argv.includes("--check")) process.exitCode = 1;
+  }
 }

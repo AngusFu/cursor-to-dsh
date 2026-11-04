@@ -21,13 +21,12 @@ DeepSeek Harness (DSH) plugin that registers Cursor as the `cursor` LLM provider
 | `src/commands.ts` | Slash commands: `/cursor-key-*` |
 | `client/factory.js` | Settings → Cursor browser page (copied to `lib/client.js`) |
 | `cordis.patch.yml` | Bundle layer that inserts the `llm-cursor` row |
-| `patches/@cursor__sdk@<ver>.patch` | pnpm patch on the locked `@cursor/sdk` (see below) |
-| `scripts/patch-cursor-sdk.mjs` | Re-applies that patch to a `pnpm patch` directory on SDK upgrades |
+| `scripts/patch-cursor-sdk.mjs` | postinstall: patches the locked `@cursor/sdk` ESM build (see below) |
 
 ## Commands
 
 ```bash
-pnpm install     # pnpm 12 only: applies patches/ to @cursor/sdk (npm would silently skip it)
+pnpm install     # pnpm 12; postinstall patches @cursor/sdk (see below)
 npm test         # unit tests with the fake Cursor agent
 npm run check    # tsc --noEmit
 npm run build    # lib/ for DSH to load
@@ -52,17 +51,18 @@ Live check (real Cursor, no DSH): `CURSOR_API_KEY=... node --experimental-strip-
 
 A DSH profile (`~/.dsh/profiles/<name>`) is a pnpm project: `package.json` lists `"cursor-to-dsh": "github:AngusFu/cursor-to-dsh#vX.Y.Z"` plus the `cursor-to-dsh` bundle, and DSH (or Desktop's bundled pnpm) runs `pnpm install` there; git installs run `prepare` (= `tsc` build), so the profile needs `allowBuilds: cursor-to-dsh: true`. DSH loads `lib/` and resolves `@cursor/sdk` through `import()`, i.e. `dist/esm`.
 
-## `@cursor/sdk`: locked + patched
+## `@cursor/sdk`: locked + patched at install
 
-- `@cursor/sdk` is pinned to an exact version (no `^`/`~`) and patched with pnpm (`patchedDependencies` in `pnpm-workspace.yaml`, file in `patches/`). Installs ship minified `dist/` (cjs, esm, bun `bundled`), not TS source, so the patch edits those three builds.
+- `@cursor/sdk` is pinned to an exact version (no `^`/`~`). Installs ship minified `dist/` (cjs, esm, bun `bundled`), not TS source.
 - Why: the SDK's `run.stream()` converter maps `webSearchToolCall` / `webFetchToolCall` to `return null`, so `tool_call` messages for them never reach the stream (still true in 1.3.1). The patch emits them as `tool_call` with `name: "webSearch" | "webFetch"`, args `{ searchTerm }` / `{ url }`, result `{ status, value | error }`, like `semSearch` / `mcp`.
+- How: `postinstall` runs `scripts/patch-cursor-sdk.mjs`, which rewrites the two cases in the one `dist/esm/*.js` chunk holding the converter (DSH loads the SDK via `import()`, so only ESM matters; cjs/bundled are left alone). No committed diff: that chunk is a single ~1.3 MB line, so a `pnpm patch` file was megabytes.
+- The script only acts on the exact version pinned in `package.json`, is idempotent (marker comment), replaces the file via rename (never mutates a hardlinked store file), and never fails the install: on a version mismatch or moved anchors it prints a warning and the plugin runs unpatched. `node scripts/patch-cursor-sdk.mjs --check` exits 1 when unpatched.
+- Works inside DSH profiles with no profile changes, as long as the profile allows builds for `cursor-to-dsh` (it already must, for `prepare`). With npm or `--ignore-scripts` nothing is patched.
 - The patch does not turn web tools on: this plugin still creates agents with `tools: ["mcp"]` only.
-- `patchedDependencies` only applies to the project being installed. Inside a DSH profile the patch is applied only if the profile's own `pnpm-workspace.yaml` lists it (copy the patch file into the profile; see README). Without that, the plugin works, unpatched.
 - Upgrade = re-patch, never bump alone:
-  1. `pnpm add @cursor/sdk@<new> --save-exact` (drop the old `patchedDependencies` entry and patch file first; new SDK releases may need `minimumReleaseAgeExclude`).
-  2. `pnpm patch @cursor/sdk@<new>` → `node scripts/patch-cursor-sdk.mjs <printed dir>` → `pnpm patch-commit <printed dir>`. The script fails loudly if the minified anchors moved; then re-read the switch around `case"webSearchToolCall"` and adjust.
-  3. `npm test` (`test/sdk-patch.test.ts` extracts the converter from each installed build and asserts web tool calls are emitted). Optionally a live run with web tools enabled.
-  4. Update the README profile snippet to the new version/patch file name.
+  1. `pnpm add @cursor/sdk@<new> --save-exact` (new releases may need `minimumReleaseAgeExclude` in `pnpm-workspace.yaml`).
+  2. `node scripts/patch-cursor-sdk.mjs` — if it warns that anchors moved, re-read the minified switch around `case"webSearchToolCall"` in `dist/esm` and adjust `patchSource()`.
+  3. `npm test` (`test/sdk-patch.test.ts` extracts the converter from the installed ESM chunk and asserts web tool calls are emitted and the patch is present). Optionally a live run with `tools: ["webSearch","webFetch"]` consuming `run.stream()`.
 
 ## ripgrep
 
