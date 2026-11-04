@@ -47,6 +47,15 @@
 
 升级：改版本号后重复第 3 步。
 
+**可选：让 Cursor 内置 webSearch / webFetch 进 run.stream()**。本仓库用 pnpm 锁定并 patch 了 `@cursor/sdk`（原版把这两种 tool call `return null` 丢掉）。`patchedDependencies` 只对正在安装的项目生效，所以 profile 要自己声明：把 `node_modules/cursor-to-dsh/patches/@cursor__sdk@1.3.1.patch` 复制到 profile 的 `patches/`，在 profile 的 `pnpm-workspace.yaml` 里加：
+
+```yaml
+patchedDependencies:
+  '@cursor/sdk@1.3.1': patches/@cursor__sdk@1.3.1.patch
+```
+
+然后重新 `pnpm install`。插件版本和 SDK 版本对不上时 pnpm 会报错，按新版本的 patch 文件名改。
+
 ### 填 API Key（支持多把）— 用配置页，不要手写 yaml
 
 在 [cursor.com/dashboard](https://cursor.com/dashboard) → API Keys → New API Key 创建（个人 key 或 service account key，不支持 Team Admin key）。
@@ -123,7 +132,7 @@
 ## 开发
 
 ```bash
-npm install && npm run build   # DSH 加载的是 lib/，改源码后要重新 build 并重启 DSH
+pnpm install && npm run build  # 必须用 pnpm 12（会应用 patches/）；DSH 加载的是 lib/，改源码后要重新 build 并重启 DSH
 npm test                       # 假 Cursor agent 的单测
 npm run check                  # 类型检查
 npm run check:public           # 推 GitHub / 发 npm 前：不含内网链接和本机路径
