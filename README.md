@@ -125,7 +125,7 @@
 ## 开发
 
 ```bash
-pnpm install && npm run build  # 必须用 pnpm 12（会应用 patches/）；DSH 加载的是 lib/，改源码后要重新 build 并重启 DSH
+pnpm install && npm run build  # 用 pnpm 12（postinstall 会 patch @cursor/sdk）；DSH 加载的是 lib/，改源码后要重新 build 并重启 DSH
 npm test                       # 假 Cursor agent 的单测
 npm run check                  # 类型检查
 npm run check:public           # 推 GitHub / 发 npm 前：不含内网链接和本机路径
