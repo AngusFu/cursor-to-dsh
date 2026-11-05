@@ -167,35 +167,65 @@ window.__ModuleLoader__.load({
       label: { fontSize: 12, fontWeight: 500, color: "var(--dsw-alias-label-secondary)" },
       error: { margin: 0, whiteSpace: "pre-wrap", color: "var(--dsw-alias-label-error, var(--dsw-alias-state-danger-label))" },
       versionLink: { color: "var(--dsw-alias-brand-primary)" },
-      windows: { display: "flex", flexDirection: "column", gap: 14 },
-      winRow: { display: "flex", flexDirection: "column", gap: 5 },
+      // Usage surfaces mirror dsh-opencode-go's pill/panel metrics so the two
+      // plugins look alike in the same input area.
+      windows: { display: "flex", flexDirection: "column", gap: 7 },
+      winTile: {
+        background: "color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 6%, transparent)",
+        borderRadius: 10, overflow: "hidden",
+      },
+      winRow: { padding: "10px 12px" },
       winHead: { display: "flex", alignItems: "center", gap: 10 },
-      winLabel: { fontSize: 13, fontWeight: 600, color: "var(--dsw-alias-label-secondary)", width: 78, flex: "none" },
-      winPct: { fontSize: 14, fontWeight: 700, color: "var(--dsw-alias-label-primary)", width: 52, textAlign: "right", flex: "none", fontVariantNumeric: "tabular-nums" },
-      barTrack: { flex: 1, height: 8, borderRadius: 8, background: "var(--dsw-alias-border-l2)", overflow: "hidden", minWidth: 40 },
-      barFill: { display: "block", height: "100%", borderRadius: 8, transition: "width .3s ease" },
-      usageFooter: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 11, color: "var(--dsw-alias-label-tertiary)", flexWrap: "wrap" },
+      winLabel: {
+        fontSize: 12.5, color: "var(--dsw-alias-label-secondary)", width: 80, flex: "none",
+        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+      },
+      winPct: { fontSize: 13, fontWeight: 650, color: "var(--dsw-alias-label-primary)", width: 44, textAlign: "right", flex: "none", fontVariantNumeric: "tabular-nums" },
+      barTrack: {
+        flex: 1, height: 8, borderRadius: 99, minWidth: 60, overflow: "hidden",
+        background: "color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 12%, transparent)",
+      },
+      barFill: { display: "block", height: "100%", borderRadius: 99, transition: "width .3s ease" },
+      winReset: { marginTop: 6, fontSize: 11, lineHeight: 1.6, color: "var(--dsw-alias-label-tertiary)" },
+      usageFooter: { padding: "2px 6px 0", fontSize: 11, lineHeight: 1.6, opacity: 0.65, color: "var(--dsw-alias-label-secondary)" },
+      section: { display: "flex", flexDirection: "column", gap: 7, minWidth: 0 },
+      sectionHead: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, padding: "2px 6px 0" },
+      sectionTitle: { fontSize: 13, fontWeight: 600, color: "var(--dsw-alias-label-primary)" },
+      compactBtn: {
+        border: "1px solid color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 25%, transparent)",
+        background: "transparent", color: "inherit", borderRadius: 6,
+        padding: "4px 9px", font: "inherit", fontSize: 11.5, cursor: "pointer",
+      },
       modeRow: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
-      sectionDivider: { borderTop: "1px solid var(--dsw-alias-border-l2)", paddingTop: 14 },
-      pillWrap: { position: "relative", display: "inline-flex" },
+      sectionDivider: {
+        height: ".5px", margin: "0 12px", flex: "none",
+        background: "color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 10%, transparent)",
+      },
+      pillWrap: { position: "relative", display: "inline-flex", minWidth: 0, color: "var(--dsw-alias-label-primary)" },
       pill: {
-        display: "inline-flex", alignItems: "center", gap: 8, height: 26, padding: "0 10px",
-        border: "1px solid var(--dsw-alias-border-l2)", borderRadius: 999,
-        background: "var(--dsw-alias-bg-layer-1)", color: "var(--dsw-alias-label-primary)",
-        fontSize: 12, fontWeight: 600, lineHeight: "24px", cursor: "pointer",
-        fontVariantNumeric: "tabular-nums",
+        display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 9px",
+        border: "1px solid color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 16%, transparent)",
+        borderRadius: 12, background: "color-mix(in srgb, var(--dsw-alias-bg-layer-1, Canvas) 72%, transparent)",
+        color: "inherit", font: "inherit", fontSize: 12.5, lineHeight: 1.6, whiteSpace: "nowrap",
+        cursor: "pointer", minWidth: 0, maxWidth: "46vw", overflow: "hidden",
       },
+      pillUnit: { color: "var(--dsw-alias-label-tertiary)" },
       pillDot: { width: 7, height: 7, borderRadius: "50%", flex: "none" },
-      pillBar: { width: 42, height: 5, borderRadius: 5, background: "var(--dsw-alias-border-l2)", overflow: "hidden", flex: "none" },
       usagePanel: {
-        position: "absolute", bottom: "calc(100% + 10px)", right: 0, width: 300,
-        display: "flex", flexDirection: "column", gap: 12, padding: 14,
-        border: "1px solid var(--dsw-alias-border-l2)", borderRadius: 12,
-        background: "var(--dsw-alias-bg-layer-1)", zIndex: 60,
-        boxShadow: "0 12px 32px rgba(0,0,0,.28)",
+        position: "absolute", bottom: "calc(100% + 10px)", right: 0, zIndex: 100,
+        boxSizing: "border-box", width: 340, maxWidth: "calc(100vw - 24px)", maxHeight: "72vh",
+        display: "flex", flexDirection: "column", fontSize: 12, isolation: "isolate",
+        color: "var(--dsw-alias-label-primary)", borderRadius: 16, overflow: "hidden",
+        border: "1px solid color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 12%, transparent)",
+        boxShadow: "0 20px 60px rgba(0,0,0,.33)",
       },
-      panelTitle: { margin: 0, fontSize: 13, fontWeight: 700, color: "var(--dsw-alias-label-primary)" },
-      panelBody: { display: "flex", flexDirection: "column", gap: 12 },
+      panelMaterial: {
+        zIndex: -1, borderRadius: "inherit", pointerEvents: "none", position: "absolute", inset: 0,
+        background: "color-mix(in srgb, var(--dsw-alias-bg-layer-1, #2a2a2c) 88%, transparent)",
+        backdropFilter: "blur(40px) saturate(150%)",
+        WebkitBackdropFilter: "blur(40px) saturate(150%)",
+      },
+      panelBody: { display: "flex", flexDirection: "column", gap: 7, padding: 10, overflowY: "auto", flex: 1, minHeight: 0, position: "relative" },
       authRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 500, color: "var(--dsw-alias-label-primary)", flexWrap: "wrap" },
       authCode: { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 17, fontWeight: 700, letterSpacing: 1.5, color: "var(--dsw-alias-label-primary)" },
       authLink: { color: "var(--dsw-alias-brand-primary)", fontSize: 13, wordBreak: "break-all" },
@@ -291,7 +321,7 @@ window.__ModuleLoader__.load({
               }),
             ],
           }),
-          win.resetsAt ? jsx("span", { style: css.meta, children: tp("usageResetsAt", formatTime(win.resetsAt)) }) : null,
+          win.resetsAt ? jsx("div", { style: css.winReset, children: tp("usageResetsAt", formatTime(win.resetsAt)) }) : null,
         ],
       });
     }
@@ -310,24 +340,26 @@ window.__ModuleLoader__.load({
       const windows = usage.windows ?? [];
       if (!windows.length) return jsx("p", { style: css.hint, children: text("usageNoData") });
       return jsx("div", {
-        style: css.windows,
-        children: windows.map((win) => jsx(UsageRow, { win }, win.id)),
+        style: css.winTile,
+        children: windows.map((win, index) =>
+          jsxs("div", {
+            children: [
+              index > 0 ? jsx("div", { style: css.sectionDivider }) : null,
+              jsx(UsageRow, { win }),
+            ],
+          }, win.id),
+        ),
       });
     }
 
     function UsageFooter({ usage }) {
       if (!usage || usage.status !== "available") return null;
-      const meta = [
+      const parts = [
+        usage.fetchedAt ? tp("usageUpdatedAt", formatTime(usage.fetchedAt)) : "",
         usage.planLabel ? `${text("usagePlan")}: ${usage.planLabel}` : "",
         usage.sourceLabel ? `${text("usageSource")}: ${usage.sourceLabel}` : "",
-      ].filter(Boolean).join(" · ");
-      return jsxs("div", {
-        style: css.usageFooter,
-        children: [
-          jsx("span", { children: usage.fetchedAt ? tp("usageUpdatedAt", formatTime(usage.fetchedAt)) : "" }),
-          meta ? jsx("span", { children: meta }) : null,
-        ],
-      });
+      ].filter(Boolean);
+      return jsx("div", { style: css.usageFooter, children: parts.join(" · ") });
     }
 
     /**
@@ -388,17 +420,18 @@ window.__ModuleLoader__.load({
       return { usage, busy, error, load, saveMode, applyMode };
     }
 
-    /** One provider's block inside the Settings card. */
+    /** One provider's block: head (title + refresh) + window tile + footer. */
     function UsageSection({ provider, state }) {
       return jsxs("div", {
-        style: css.windows,
+        style: css.section,
         children: [
           jsxs("div", {
-            style: css.row,
+            style: css.sectionHead,
             children: [
-              jsx("h4", { style: css.h3, children: text(PROVIDERS[provider].sectionKey) }),
-              jsx(Button, {
-                variant: "outline",
+              jsx("span", { style: css.sectionTitle, children: text(PROVIDERS[provider].sectionKey) }),
+              jsx("button", {
+                type: "button",
+                style: css.compactBtn,
                 disabled: state.busy,
                 onClick: () => { void state.load(true); },
                 children: text("refresh"),
@@ -423,12 +456,11 @@ window.__ModuleLoader__.load({
       );
       const dirState = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
       const modelProvider = directory ? (dirState?.current?.provider ?? null) : null;
-      const quotaProvider = quotaProviderOf(modelProvider) ?? "cursor";
       const covered = !directory || quotaProviderOf(modelProvider) !== null;
-      const { usage, busy, error, load } = useUsage(
-        (value) => Boolean(value) && value.mode !== "off",
-        quotaProvider,
-      );
+      const activeProvider = quotaProviderOf(modelProvider) ?? "cursor";
+      const shouldPoll = (value) => Boolean(value) && value.mode !== "off";
+      const cursorState = useUsage(shouldPoll, "cursor");
+      const copilotState = useUsage(shouldPoll, "copilot");
       const [open, setOpen] = useState(false);
       const wrapRef = useRef(null);
 
@@ -441,67 +473,63 @@ window.__ModuleLoader__.load({
         return () => document.removeEventListener("pointerdown", onDown);
       }, [open]);
 
-      if (!usage || usage.mode === "off") return null;
+      const mode = cursorState.usage?.mode ?? copilotState.usage?.mode ?? "auto";
+      if (mode === "off") return null;
       // auto: only while this session is on a covered model (no directory store = show it).
-      if (usage.mode === "auto" && !covered) return null;
+      if (mode === "auto" && !covered) return null;
 
-      const sectionKey = PROVIDERS[quotaProvider].sectionKey;
-      const windows = usage.status === "available" ? usage.windows ?? [] : [];
-      const preferred = quotaProvider === "copilot" ? "premium" : "total";
+      // Collapsed readings follow the current model's provider; the panel always
+      // shows both, so 常驻 mode never hides the other provider's quota.
+      const active = activeProvider === "copilot" ? copilotState : cursorState;
+      const usage = active.usage;
+      const sectionKey = PROVIDERS[activeProvider].sectionKey;
+      const windows = usage?.status === "available" ? usage.windows ?? [] : [];
+      const preferred = activeProvider === "copilot" ? "premium" : "total";
       const main =
         windows.find((win) => win.id === preferred) ??
         windows.find((win) => win.id === "auto") ??
         windows.find((win) => !win.unlimited) ??
         windows[0];
-      const pct = main ? (main.unlimited ? 100 : Math.max(0, Math.min(100, Number(main.usedPct) || 0))) : 0;
-      const color = toneColor(main?.tone);
+      // Second reading: the window that most needs attention, else the next row.
+      const second =
+        windows.find((win) => win !== main && win.tone !== "ok") ??
+        windows.find((win) => win !== main && win.id !== preferred && win.id !== "auto") ??
+        (windows.length > 1 && windows[1] !== main ? windows[1] : undefined);
       const winLine = (win) =>
         `${text(WIN_KEYS[win.id] ?? "winTotal")} ${win.unlimited ? text("usageUnlimited") : formatPct(win.usedPct)}`;
-      const title = usage.status === "available"
+      const triggerText = !usage
+        ? "…"
+        : usage.status !== "available"
+          ? "—"
+          : [text(sectionKey), main && winLine(main), second && winLine(second)]
+              .filter(Boolean)
+              .join(" · ");
+      const title = usage?.status === "available"
         ? `${text(sectionKey)} · ${windows.map(winLine).join(" · ")}`
-        : (usage.error ?? text(quotaProvider === "copilot" ? "usageNoCopilot" : "usageNoSignIn"));
+        : (usage?.error ?? text(activeProvider === "copilot" ? "usageNoCopilot" : "usageNoSignIn"));
 
       return jsxs("div", { style: css.pillWrap, ref: wrapRef, children: [
         jsx("button", {
           type: "button",
-          style: { ...css.pill, ...(open ? { borderColor: "var(--dsw-alias-brand-primary)" } : {}) },
+          style: css.pill,
           title,
           "aria-expanded": open,
           onClick: () => setOpen((value) => !value),
-          children: [
-            jsx("span", { style: { ...css.pillDot, background: usage.status === "available" ? color : TONE_COLORS.danger } }),
-            jsx("span", {
-              style: css.pillBar,
-              children: jsx("span", { style: { ...css.barFill, width: `${pct}%`, background: color } }),
-            }),
-            jsx("span", {
-              children: usage.status !== "available"
-                ? "—"
-                : (main?.unlimited ? text("usageUnlimited") : formatPct(pct)),
-            }),
-          ],
+          children: triggerText,
         }),
         open
           ? jsxs("div", {
               style: css.usagePanel,
               children: [
+                jsx("div", { style: css.panelMaterial }),
                 jsxs("div", {
-                  style: css.usageFooter,
+                  style: css.panelBody,
                   children: [
-                    jsx("p", { style: css.panelTitle, children: text(sectionKey) }),
-                    jsx(Button, {
-                      variant: "outline",
-                      disabled: busy,
-                      onClick: () => { void load(true); },
-                      children: text("refresh"),
-                    }),
+                    jsx(UsageSection, { provider: "cursor", state: cursorState }),
+                    jsx("div", { style: css.sectionDivider }),
+                    jsx(UsageSection, { provider: "copilot", state: copilotState }),
                   ],
                 }),
-                jsx("div", {
-                  style: css.panelBody,
-                  children: jsx(UsageBody, { usage, error, provider: quotaProvider }),
-                }),
-                jsx(UsageFooter, { usage }),
               ],
             })
           : null,
@@ -558,19 +586,30 @@ window.__ModuleLoader__.load({
             style: css.row,
             children: [
               jsx("h3", { style: css.h3, children: text("copilotAuthTitle") }),
-              authenticated
-                ? jsx(Button, {
+              jsxs("div", {
+                style: css.actions,
+                children: [
+                  jsx(Button, {
                     variant: "outline",
                     disabled: busy,
-                    onClick: () => { void run(() => request("/copilot/logout", "POST", {})); },
-                    children: text("copilotLogout"),
-                  })
-                : jsx(Button, {
-                    variant: "primary",
-                    disabled: busy || pending,
-                    onClick: () => { void run(() => request("/copilot/login", "POST", {})); },
-                    children: text("copilotLogin"),
+                    onClick: () => { void load(); },
+                    children: text("refresh"),
                   }),
+                  authenticated
+                    ? jsx(Button, {
+                        variant: "outline",
+                        disabled: busy,
+                        onClick: () => { void run(() => request("/copilot/logout", "POST", {})); },
+                        children: text("copilotLogout"),
+                      })
+                    : jsx(Button, {
+                        variant: "primary",
+                        disabled: busy || pending,
+                        onClick: () => { void run(() => request("/copilot/login", "POST", {})); },
+                        children: text("copilotLogin"),
+                      }),
+                ],
+              }),
             ],
           }),
           jsx("p", { style: css.hint, children: text("copilotAuthHint") }),
@@ -673,10 +712,8 @@ window.__ModuleLoader__.load({
               jsx("h3", { style: css.h3, children: text("usageTitle") }),
               jsx("p", { style: css.hint, children: text("usageHint") }),
               jsx(UsageSection, { provider: "cursor", state: cursorUsage }),
-              jsx("div", {
-                style: css.sectionDivider,
-                children: jsx(UsageSection, { provider: "copilot", state: copilotUsage }),
-              }),
+              jsx("div", { style: css.sectionDivider }),
+              jsx(UsageSection, { provider: "copilot", state: copilotUsage }),
               jsxs("div", {
                 style: css.modeRow,
                 children: [
