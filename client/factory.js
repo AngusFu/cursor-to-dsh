@@ -43,8 +43,7 @@ window.__ModuleLoader__.load({
       pluginVersion: "Plugin version:",
       error: "Error",
       usageTitle: "Usage",
-      usagePanelTitle: "Cursor usage",
-      usageHint: "Read from this host's Cursor sign-in; a dashboard API key alone is not enough.",
+      usageHint: "Cursor reads this host's Cursor sign-in; Copilot reuses the Copilot sign-in in Settings. Cached up to 2 minutes.",
       usagePillLabel: "Usage pill",
       usageModeAuto: "Auto",
       usageModeAlways: "Always",
@@ -60,6 +59,14 @@ window.__ModuleLoader__.load({
       winApi: "API",
       winTotal: "Total",
       winGrok: "Grok Bot",
+      winPremium: "Premium",
+      winChat: "Chat",
+      winCompletions: "Completions",
+      usageUnlimited: "Unlimited",
+      usagePlan: "Plan",
+      usageSectionCursor: "Cursor usage",
+      usageSectionCopilot: "Copilot usage",
+      usageNoCopilot: "No GitHub token found. Sign in to Copilot under Settings, or set GITHUB_TOKEN.",
     };
     const ZH = {
       nav: "Cursor",
@@ -86,8 +93,7 @@ window.__ModuleLoader__.load({
       pluginVersion: "插件版本：",
       error: "错误",
       usageTitle: "用量",
-      usagePanelTitle: "Cursor 用量",
-      usageHint: "读取本机 Cursor 登录态；只存 Dashboard API Key 拿不到用量。",
+      usageHint: "Cursor 读本机 Cursor 登录态，Copilot 复用设置里的 Copilot 登录；最多缓存 2 分钟。",
       usagePillLabel: "用量胶囊",
       usageModeAuto: "自动",
       usageModeAlways: "常驻",
@@ -103,6 +109,14 @@ window.__ModuleLoader__.load({
       winApi: "API",
       winTotal: "合计",
       winGrok: "Grok Bot",
+      winPremium: "高级请求",
+      winChat: "对话",
+      winCompletions: "补全",
+      usageUnlimited: "不限",
+      usagePlan: "套餐",
+      usageSectionCursor: "Cursor 用量",
+      usageSectionCopilot: "Copilot 用量",
+      usageNoCopilot: "未登录 Copilot：先在设置里完成 Copilot 登录，或设置 GITHUB_TOKEN。",
     };
 
     let localeRuntime;
@@ -142,6 +156,7 @@ window.__ModuleLoader__.load({
       barFill: { display: "block", height: "100%", borderRadius: 8, transition: "width .3s ease" },
       usageFooter: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 11, color: "var(--dsw-alias-label-tertiary)", flexWrap: "wrap" },
       modeRow: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
+      sectionDivider: { borderTop: "1px solid var(--dsw-alias-border-l2)", paddingTop: 14 },
       pillWrap: { position: "relative", display: "inline-flex" },
       pill: {
         display: "inline-flex", alignItems: "center", gap: 8, height: 26, padding: "0 10px",
@@ -187,14 +202,27 @@ window.__ModuleLoader__.load({
     const USAGE_POLL_MS = 60_000;
     const MODES = ["auto", "always", "off"];
     const MODE_KEYS = { auto: "usageModeAuto", always: "usageModeAlways", off: "usageModeOff" };
-    const WIN_KEYS = { auto: "winAuto", api: "winApi", total: "winTotal", grok_bot: "winGrok" };
+    const WIN_KEYS = {
+      auto: "winAuto", api: "winApi", total: "winTotal", grok_bot: "winGrok",
+      premium: "winPremium", chat: "winChat", completions: "winCompletions",
+    };
+    /** Quota provider id -> display block. */
+    const PROVIDERS = {
+      cursor: { sectionKey: "usageSectionCursor" },
+      copilot: { sectionKey: "usageSectionCopilot" },
+    };
     const TONE_COLORS = {
       ok: "var(--dsw-alias-label-success, #3fa66a)",
       warning: "var(--dsw-alias-label-warning, #b46900)",
       danger: "var(--dsw-alias-label-danger, #c93c3c)",
     };
 
-    const readUsage = (force) => request(`/usage${force ? "?force=1" : ""}`);
+    /** Model-directory provider id -> quota provider id (null = not covered). */
+    const quotaProviderOf = (modelProvider) =>
+      modelProvider === "cursor" ? "cursor" : modelProvider === "github-copilot" ? "copilot" : null;
+
+    const readUsage = (force, provider) =>
+      request(`/usage?provider=${encodeURIComponent(provider)}${force ? "&force=1" : ""}`);
     const writeUsageMode = (mode) => request("/usage/display", "POST", { mode });
 
     function tp(key, value) {
@@ -216,7 +244,7 @@ window.__ModuleLoader__.load({
     const toneColor = (tone) => TONE_COLORS[tone] ?? TONE_COLORS.ok;
 
     function UsageRow({ win }) {
-      const pct = Math.max(0, Math.min(100, Number(win.usedPct) || 0));
+      const pct = win.unlimited ? 100 : Math.max(0, Math.min(100, Number(win.usedPct) || 0));
       return jsxs("div", {
         style: css.winRow,
         children: [
@@ -226,9 +254,18 @@ window.__ModuleLoader__.load({
               jsx("span", { style: css.winLabel, children: text(WIN_KEYS[win.id] ?? "winTotal") }),
               jsx("span", {
                 style: css.barTrack,
-                children: jsx("span", { style: { ...css.barFill, width: `${pct}%`, background: toneColor(win.tone) } }),
+                children: jsx("span", {
+                  style: {
+                    ...css.barFill,
+                    width: `${pct}%`,
+                    background: win.unlimited ? "var(--dsw-alias-label-tertiary)" : toneColor(win.tone),
+                  },
+                }),
               }),
-              jsx("span", { style: css.winPct, children: formatPct(pct) }),
+              jsx("span", {
+                style: css.winPct,
+                children: win.unlimited ? text("usageUnlimited") : formatPct(pct),
+              }),
             ],
           }),
           win.resetsAt ? jsx("span", { style: css.meta, children: tp("usageResetsAt", formatTime(win.resetsAt)) }) : null,
@@ -237,10 +274,15 @@ window.__ModuleLoader__.load({
     }
 
     /** Rows / hint / error for one usage snapshot; shared by the card and the pill panel. */
-    function UsageBody({ usage, error }) {
+    function UsageBody({ usage, error, provider }) {
       if (error) return jsx("p", { role: "alert", style: css.error, children: error });
       if (!usage) return jsx("p", { style: css.hint, children: text("usageLoading") });
-      if (usage.status === "unavailable") return jsx("p", { style: css.hint, children: text("usageNoSignIn") });
+      if (usage.status === "unavailable") {
+        return jsx("p", {
+          style: css.hint,
+          children: text(provider === "copilot" ? "usageNoCopilot" : "usageNoSignIn"),
+        });
+      }
       if (usage.status === "error") return jsx("p", { role: "alert", style: css.error, children: usage.error ?? text("error") });
       const windows = usage.windows ?? [];
       if (!windows.length) return jsx("p", { style: css.hint, children: text("usageNoData") });
@@ -252,11 +294,15 @@ window.__ModuleLoader__.load({
 
     function UsageFooter({ usage }) {
       if (!usage || usage.status !== "available") return null;
+      const meta = [
+        usage.planLabel ? `${text("usagePlan")}: ${usage.planLabel}` : "",
+        usage.sourceLabel ? `${text("usageSource")}: ${usage.sourceLabel}` : "",
+      ].filter(Boolean).join(" · ");
       return jsxs("div", {
         style: css.usageFooter,
         children: [
           jsx("span", { children: usage.fetchedAt ? tp("usageUpdatedAt", formatTime(usage.fetchedAt)) : "" }),
-          usage.sourceLabel ? jsx("span", { children: `${text("usageSource")}: ${usage.sourceLabel}` }) : null,
+          meta ? jsx("span", { children: meta }) : null,
         ],
       });
     }
@@ -266,27 +312,27 @@ window.__ModuleLoader__.load({
      * `shouldPoll(usage)` decides the 60s timer; the page pauses it while hidden and
      * refreshes immediately when it becomes visible again.
      */
-    function useUsage(shouldPoll) {
+    function useUsage(shouldPoll, provider) {
       const [usage, setUsage] = useState();
       const [busy, setBusy] = useState(false);
       const [error, setError] = useState();
 
       const load = useCallback((force) => {
         setBusy(true);
-        return readUsage(force).then(
+        return readUsage(force, provider).then(
           (next) => { setUsage(next); setError(void 0); return next; },
           (cause) => { setError(cause instanceof Error ? cause.message : String(cause)); return void 0; },
         ).finally(() => setBusy(false));
-      }, []);
+      }, [provider]);
 
       useEffect(() => {
         let alive = true;
-        readUsage(false).then(
+        readUsage(false, provider).then(
           (next) => { if (alive) { setUsage(next); setError(void 0); } },
           (cause) => { if (alive) setError(cause instanceof Error ? cause.message : String(cause)); },
         );
         return () => { alive = false; };
-      }, []);
+      }, [provider]);
 
       const poll = shouldPoll(usage);
       useEffect(() => {
@@ -297,15 +343,49 @@ window.__ModuleLoader__.load({
         return () => { clearInterval(timer); document.removeEventListener("visibilitychange", refresh); };
       }, [poll, load]);
 
-      const setMode = useCallback((mode) => {
+      /** Save the pill display mode (one POST) and adopt it into this state. */
+      const saveMode = useCallback((mode) => {
         setBusy(true);
         return writeUsageMode(mode).then(
-          (next) => { setUsage(next); setError(void 0); return next; },
+          (next) => {
+            const saved = next?.mode ?? mode;
+            setUsage((prev) => (prev ? { ...prev, mode: saved } : prev));
+            setError(void 0);
+            return saved;
+          },
           (cause) => { setError(cause instanceof Error ? cause.message : String(cause)); return void 0; },
         ).finally(() => setBusy(false));
       }, []);
 
-      return { usage, busy, error, load, setMode };
+      /** Adopt a mode another state just saved, without a second POST. */
+      const applyMode = useCallback((mode) => {
+        setUsage((prev) => (prev ? { ...prev, mode } : prev));
+      }, []);
+
+      return { usage, busy, error, load, saveMode, applyMode };
+    }
+
+    /** One provider's block inside the Settings card. */
+    function UsageSection({ provider, state }) {
+      return jsxs("div", {
+        style: css.windows,
+        children: [
+          jsxs("div", {
+            style: css.row,
+            children: [
+              jsx("h4", { style: css.h3, children: text(PROVIDERS[provider].sectionKey) }),
+              jsx(Button, {
+                variant: "outline",
+                disabled: state.busy,
+                onClick: () => { void state.load(true); },
+                children: text("refresh"),
+              }),
+            ],
+          }),
+          jsx(UsageBody, { usage: state.usage, error: state.error, provider }),
+          jsx(UsageFooter, { usage: state.usage }),
+        ],
+      });
     }
 
     const EMPTY_DIRECTORY_STORE = { subscribe: () => () => {}, getSnapshot: () => null };
@@ -319,7 +399,13 @@ window.__ModuleLoader__.load({
         [directory],
       );
       const dirState = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
-      const { usage, busy, error, load } = useUsage((value) => Boolean(value) && value.mode !== "off");
+      const modelProvider = directory ? (dirState?.current?.provider ?? null) : null;
+      const quotaProvider = quotaProviderOf(modelProvider) ?? "cursor";
+      const covered = !directory || quotaProviderOf(modelProvider) !== null;
+      const { usage, busy, error, load } = useUsage(
+        (value) => Boolean(value) && value.mode !== "off",
+        quotaProvider,
+      );
       const [open, setOpen] = useState(false);
       const wrapRef = useRef(null);
 
@@ -333,16 +419,24 @@ window.__ModuleLoader__.load({
       }, [open]);
 
       if (!usage || usage.mode === "off") return null;
-      // auto: only while this session is on a Cursor model (no directory store = show it).
-      if (usage.mode === "auto" && directory && dirState?.current?.provider !== "cursor") return null;
+      // auto: only while this session is on a covered model (no directory store = show it).
+      if (usage.mode === "auto" && !covered) return null;
 
+      const sectionKey = PROVIDERS[quotaProvider].sectionKey;
       const windows = usage.status === "available" ? usage.windows ?? [] : [];
-      const main = windows.find((win) => win.id === "total") ?? windows.find((win) => win.id === "auto") ?? windows[0];
-      const pct = main ? Math.max(0, Math.min(100, Number(main.usedPct) || 0)) : 0;
+      const preferred = quotaProvider === "copilot" ? "premium" : "total";
+      const main =
+        windows.find((win) => win.id === preferred) ??
+        windows.find((win) => win.id === "auto") ??
+        windows.find((win) => !win.unlimited) ??
+        windows[0];
+      const pct = main ? (main.unlimited ? 100 : Math.max(0, Math.min(100, Number(main.usedPct) || 0))) : 0;
       const color = toneColor(main?.tone);
+      const winLine = (win) =>
+        `${text(WIN_KEYS[win.id] ?? "winTotal")} ${win.unlimited ? text("usageUnlimited") : formatPct(win.usedPct)}`;
       const title = usage.status === "available"
-        ? `${text("usagePanelTitle")} · ${windows.map((win) => `${text(WIN_KEYS[win.id] ?? "winTotal")} ${formatPct(win.usedPct)}`).join(" · ")}`
-        : (usage.error ?? text("usageNoSignIn"));
+        ? `${text(sectionKey)} · ${windows.map(winLine).join(" · ")}`
+        : (usage.error ?? text(quotaProvider === "copilot" ? "usageNoCopilot" : "usageNoSignIn"));
 
       return jsxs("div", { style: css.pillWrap, ref: wrapRef, children: [
         jsx("button", {
@@ -357,7 +451,11 @@ window.__ModuleLoader__.load({
               style: css.pillBar,
               children: jsx("span", { style: { ...css.barFill, width: `${pct}%`, background: color } }),
             }),
-            jsx("span", { children: usage.status === "available" ? formatPct(pct) : "—" }),
+            jsx("span", {
+              children: usage.status !== "available"
+                ? "—"
+                : (main?.unlimited ? text("usageUnlimited") : formatPct(pct)),
+            }),
           ],
         }),
         open
@@ -367,7 +465,7 @@ window.__ModuleLoader__.load({
                 jsxs("div", {
                   style: css.usageFooter,
                   children: [
-                    jsx("p", { style: css.panelTitle, children: text("usagePanelTitle") }),
+                    jsx("p", { style: css.panelTitle, children: text(sectionKey) }),
                     jsx(Button, {
                       variant: "outline",
                       disabled: busy,
@@ -376,7 +474,10 @@ window.__ModuleLoader__.load({
                     }),
                   ],
                 }),
-                jsx("div", { style: css.panelBody, children: jsx(UsageBody, { usage, error }) }),
+                jsx("div", {
+                  style: css.panelBody,
+                  children: jsx(UsageBody, { usage, error, provider: quotaProvider }),
+                }),
                 jsx(UsageFooter, { usage }),
               ],
             })
@@ -428,7 +529,15 @@ window.__ModuleLoader__.load({
       };
 
 
-      const usageState = useUsage(() => false);
+      const cursorUsage = useUsage(() => false, "cursor");
+      const copilotUsage = useUsage(() => false, "copilot");
+      const setMode = (mode) => {
+        void cursorUsage.saveMode(mode).then((saved) => {
+          if (saved) copilotUsage.applyMode(saved);
+        });
+      };
+      const mode = cursorUsage.usage?.mode ?? copilotUsage.usage?.mode ?? "auto";
+      const modeBusy = cursorUsage.busy || copilotUsage.busy;
 
       return jsxs("section", {
         style: css.section,
@@ -439,32 +548,24 @@ window.__ModuleLoader__.load({
           jsxs("div", {
             style: css.card,
             children: [
-              jsxs("div", {
-                style: css.row,
-                children: [
-                  jsx("h3", { style: css.h3, children: text("usageTitle") }),
-                  jsx(Button, {
-                    variant: "outline",
-                    disabled: usageState.busy,
-                    onClick: () => { void usageState.load(true); },
-                    children: text("refresh"),
-                  }),
-                ],
-              }),
+              jsx("h3", { style: css.h3, children: text("usageTitle") }),
               jsx("p", { style: css.hint, children: text("usageHint") }),
-              jsx(UsageBody, { usage: usageState.usage, error: usageState.error }),
-              jsx(UsageFooter, { usage: usageState.usage }),
+              jsx(UsageSection, { provider: "cursor", state: cursorUsage }),
+              jsx("div", {
+                style: css.sectionDivider,
+                children: jsx(UsageSection, { provider: "copilot", state: copilotUsage }),
+              }),
               jsxs("div", {
                 style: css.modeRow,
                 children: [
                   jsx("span", { style: css.label, children: text("usagePillLabel") }),
-                  ...MODES.map((mode) =>
+                  ...MODES.map((item) =>
                     jsx(Button, {
-                      variant: (usageState.usage?.mode ?? "auto") === mode ? "primary" : "outline",
-                      disabled: usageState.busy,
-                      onClick: () => { void usageState.setMode(mode); },
-                      children: text(MODE_KEYS[mode]),
-                    }, mode),
+                      variant: mode === item ? "primary" : "outline",
+                      disabled: modeBusy,
+                      onClick: () => setMode(item),
+                      children: text(MODE_KEYS[item]),
+                    }, item),
                   ),
                 ],
               }),

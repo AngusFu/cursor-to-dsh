@@ -5,7 +5,7 @@
  * through credentials.set — never hand-edit ~/.dsh/.credentials.yaml.
  */
 import type { Context, Volatile } from "@deepseek-ai/cordis";
-import { credentialRef } from "@deepseek-ai/dsh-credentials";
+import { credentialKey, credentialRef } from "@deepseek-ai/dsh-credentials";
 import { launchEnvironmentOf } from "@deepseek-ai/dsh-launch-environment";
 import Schema from "@deepseek-ai/schemastery";
 
@@ -131,7 +131,29 @@ export function apply(ctx: Context, config: Config): void {
   (ctx as any).llm.registerAdapter([PROVIDER_ID], adapter);
   ctx.effect(() => () => closeAllCursorSessions(), "cursor sessions");
 
-  registerHostApi(ctx, getConfig, resolveApiKey);
+  /**
+   * Long-lived GitHub OAuth token the Copilot sign-in plugin stored
+   * (`llm-pi-ai` grant), plus the ambient override it documents. Read-only:
+   * this plugin never writes Copilot credentials.
+   */
+  const readCopilotTokens = async (): Promise<string[]> => {
+    const out: string[] = [];
+    const credentials: any = (ctx as any).get("credentials");
+    if (credentials?.readRecord) {
+      try {
+        const record = await credentials.readRecord(credentialKey("llm-pi-ai", "github-copilot"));
+        const refresh = record?.payload?.refresh;
+        if (typeof refresh === "string" && refresh.trim()) out.push(refresh.trim());
+      } catch (err) {
+        debug(`copilot grant lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    const ambient = launchEnvironmentOf(ctx).get("GITHUB_COPILOT_OAUTH_TOKEN")?.value ?? process.env.GITHUB_COPILOT_OAUTH_TOKEN;
+    if (ambient?.trim()) out.push(ambient.trim());
+    return out;
+  };
+
+  registerHostApi(ctx, getConfig, resolveApiKey, readCopilotTokens);
   registerCursorCommands(ctx, getConfig);
 
   void resolveApiKey()

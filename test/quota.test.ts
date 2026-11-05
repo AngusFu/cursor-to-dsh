@@ -4,13 +4,12 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { parseTimestamp, toneFromUsedPct } from "../src/quota.ts";
 import {
   fetchCursorUsage,
-  parseTimestamp,
   resetUsageCache,
-  toneFromUsedPct,
   tokenCandidates,
-} from "../src/quota.ts";
+} from "../src/quota-cursor.ts";
 
 const USAGE_URL = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
 const GROK_URL = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetSandUsageStatus";

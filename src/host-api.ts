@@ -12,7 +12,8 @@ import {
   uiSnapshot,
   useProfile,
 } from "./ui-state.ts";
-import { fetchCursorUsage } from "./quota.ts";
+import { fetchCursorUsage } from "./quota-cursor.ts";
+import { fetchCopilotUsage } from "./quota-copilot.ts";
 
 const API_ROOT = "/api/cursor-to-dsh";
 
@@ -37,6 +38,7 @@ export function registerHostApi(
   ctx: any,
   getConfig: () => CursorUiConfig,
   resolveStoredKey?: () => Promise<string | undefined>,
+  readCopilotTokens?: () => Promise<string[]>,
 ): void {
   const fetchAction = (action: (request: Request) => Promise<unknown>) => async (request: Request) => {
     try {
@@ -47,15 +49,27 @@ export function registerHostApi(
   };
 
   /** Usage payload for the Settings card and the conversation usage pill. */
-  const usageSnapshot = async (force: boolean): Promise<Record<string, unknown>> => {
-    let storedKey: string | undefined;
-    try {
-      storedKey = resolveStoredKey ? await resolveStoredKey() : undefined;
-    } catch {
-      storedKey = undefined;
+  const usageSnapshot = async (provider: string, force: boolean): Promise<Record<string, unknown>> => {
+    const mode = readUsageDisplay(getConfig());
+    if (provider === "cursor") {
+      let storedKey: string | undefined;
+      try {
+        storedKey = resolveStoredKey ? await resolveStoredKey() : undefined;
+      } catch {
+        storedKey = undefined;
+      }
+      return { mode, provider, ...(await fetchCursorUsage({ storedKey: storedKey ?? null, force })) };
     }
-    const snapshot = await fetchCursorUsage({ storedKey: storedKey ?? null, force });
-    return { mode: readUsageDisplay(getConfig()), ...snapshot };
+    if (provider === "copilot") {
+      let tokens: string[] = [];
+      try {
+        tokens = readCopilotTokens ? await readCopilotTokens() : [];
+      } catch {
+        tokens = [];
+      }
+      return { mode, provider, ...(await fetchCopilotUsage({ tokens, force })) };
+    }
+    throw new Error(`Unknown usage provider: ${provider}`);
   };
 
   ctx.inject(["connection"], (cctx: any) => {
@@ -118,7 +132,10 @@ export function registerHostApi(
           path: `${API_ROOT}/usage`,
           methods: ["GET"],
           requestBody: "buffered",
-          fetch: fetchAction(async (request) => usageSnapshot(/[?&]force=1(&|$)/.test(request.url ?? ""))),
+          fetch: fetchAction(async (request) => {
+            const query = new URLSearchParams(String(request.url ?? "").split("?")[1] ?? "");
+            return usageSnapshot(query.get("provider") ?? "cursor", query.get("force") === "1");
+          }),
         }),
         cctx.connection.fetch.register({
           path: `${API_ROOT}/usage/display`,
@@ -126,8 +143,8 @@ export function registerHostApi(
           requestBody: "buffered",
           fetch: fetchAction(async (request) => {
             const body = await readJson(request);
-            await setUsageDisplay(ctx, getConfig(), String(body.mode ?? ""));
-            return usageSnapshot(false);
+            const mode = await setUsageDisplay(ctx, getConfig(), String(body.mode ?? ""));
+            return { mode };
           }),
         }),
       ];
