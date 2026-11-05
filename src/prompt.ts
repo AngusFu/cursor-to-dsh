@@ -58,6 +58,16 @@ export function asObject(value: unknown): Record<string, any> {
 
 const TOOLS_NOTE = "Only the tools attached to this request are available. Cursor's built-in file, shell and edit tools are disabled; do not try them.";
 
+/** Shorter twin of docs/agent-tool-discipline.md — prepended on every Cursor session's first send. */
+const TOOL_DISCIPLINE_NOTE = [
+  "Tool discipline (this host, not Cursor IDE):",
+  "- Use each tool's JSON Schema on this request only; do not reuse argument names from Cursor or other hosts (e.g. path or glob_pattern). File tools use file_path; glob and grep require pattern. On INVALID_ARGS or missing required property, fix names from the error—never repeat the same call.",
+  "- Before edit, read the file so old_string matches exactly; if old_string was not found, read again and adjust.",
+  "- Before removing a file, symbol, or UI surface, grep for references and update shared helpers and tests in the same pass.",
+  "- After large deletes, run build/tests; treat non-zero bash exit codes as blocking. read offset must be a positive line within the file.",
+  "- grep/glob/read need real files, not paths inside .asar app bundles (IO error Not a directory). Search the session working directory or a git checkout—not runtime paths under *.app/Contents/Resources/app.asar/.",
+].join("\n");
+
 // Cursor account rules often say "read ~/.../AGENTS.md first"; DSH injects instruction files itself.
 const INSTRUCTIONS_NOTE =
   "The system prompt and context messages below come from the host agent and already include the user's instruction files (AGENTS.md and similar). If Cursor user rules ask you to read such a file first, treat it as already read; do not call a tool for it unless the user asks.";
@@ -85,7 +95,7 @@ function renderMessage(m: any): string {
 
 /** The first send of a session: tool rules, the system prompt, then the history so far. */
 export function renderTranscript(systemPrompt: string | undefined, messages: any[]): string {
-  const parts = [TOOLS_NOTE];
+  const parts = [TOOLS_NOTE, TOOL_DISCIPLINE_NOTE];
   const system = systemPrompt?.trim();
   if (system) parts.push(INSTRUCTIONS_NOTE, system);
   const history = messages.map(renderMessage).filter(Boolean);
