@@ -13,7 +13,8 @@
 ## 特点
 
 - **官方接口**：聊天只用 Cursor 官方 `@cursor/sdk` 和你自己的 API Key，不改宿主代码；通过 DSH 的 `ctx.llm.registerAdapter` 注册。
-- **用量 UI**：设置 → Cursor 的「用量」卡片 + 输入框旁用量胶囊（自动 / 常驻 / 关闭），按当前模型切换显示 Cursor（Auto / API / 合计 / Grok Bot）或 Copilot（Premium / 对话 / 补全，无限额显示「不限」）的百分比与重置时间。Cursor 侧凭据取本机 Cursor 登录态（`state.vscdb` / `auth.json`，API Key 单独拿不到用量）；Copilot 侧只借 Copilot 插件登录保存的 grant（不改它的登录），退化到 `GITHUB_TOKEN` / `gh auth token`。
+- **用量 UI**：设置 → Cursor 的「用量」卡片 + 输入框旁用量胶囊（自动 / 常驻 / 关闭），按当前模型切换显示 Cursor（Auto / API / 合计 / Grok Bot）或 Copilot（Premium / 对话 / 补全，无限额显示「不限」）的百分比与重置时间。Cursor 侧凭据取本机 Cursor 登录态（`state.vscdb` / `auth.json`，API Key 单独拿不到用量）；Copilot 侧只借 Copilot 登录保存的 grant（不改它的登录），退化到 `GITHUB_TOKEN` / `gh auth token`。
+- **Copilot 登录**：设置 → Cursor 的「Copilot 登录」卡 + `/copilot-login`、`/copilot-status`、`/copilot-logout` 命令，设备码登录；凭据记录沿用 `llm-pi-ai/github-copilot`（与 DSH 内置 `github-copilot` 路由一致），迁移自 `@lujianjun19/dsh-llm-github-copilot`，验证通过后可卸载该插件。
 - **工具归 DSH**：默认关闭 Cursor 内置工具；读写文件、执行命令都由 DSH 执行，沿用沙箱和审批。
 - **多 Key UI**：设置 → Cursor 添加 / 保存 / 选用 / 删除；也可用 `/cursor-key-*` 命令。
 - **缓存复用**：每个 DSH 会话对应一个 Cursor agent，只发新增内容；工具结果回填到同一个 run 继续。

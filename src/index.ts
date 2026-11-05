@@ -10,6 +10,7 @@ import { launchEnvironmentOf } from "@deepseek-ai/dsh-launch-environment";
 import Schema from "@deepseek-ai/schemastery";
 
 import { CursorAdapter } from "./adapter.ts";
+import { registerCopilotAuth } from "./copilot-auth.ts";
 import { registerCursorCommands } from "./commands.ts";
 import { cfgString } from "./config-value.ts";
 import { registerHostApi } from "./host-api.ts";
@@ -154,6 +155,7 @@ export function apply(ctx: Context, config: Config): void {
   };
 
   registerHostApi(ctx, getConfig, resolveApiKey, readCopilotTokens);
+  registerCopilotAuth(ctx);
   registerCursorCommands(ctx, getConfig);
 
   void resolveApiKey()

@@ -20,6 +20,7 @@ DeepSeek Harness (DSH) plugin that registers Cursor as the `cursor` LLM provider
 | `src/quota.ts` | Shared quota core: window / snapshot types, tone, 2-min SWR cache |
 | `src/quota-cursor.ts` | Cursor usage: login-state token ladder, DashboardService RPCs |
 | `src/quota-copilot.ts` | Copilot usage: borrowed grant / env / gh token, GitHub internal endpoint |
+| `src/copilot-auth.ts` | Copilot device-flow sign-in (ported from @lujianjun19/dsh-llm-github-copilot) |
 | `src/host-api.ts` | Authenticated `/api/cursor-to-dsh/*` for Settings → Cursor (keys + usage) |
 | `src/commands.ts` | Slash commands: `/cursor-key-*` |
 | `client/factory.js` | Settings → Cursor browser page + conversation usage pill (copied to `lib/client.js`) |

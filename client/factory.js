@@ -67,6 +67,16 @@ window.__ModuleLoader__.load({
       usageSectionCursor: "Cursor usage",
       usageSectionCopilot: "Copilot usage",
       usageNoCopilot: "No GitHub token found. Sign in to Copilot under Settings, or set GITHUB_TOKEN.",
+      copilotAuthTitle: "Copilot sign-in",
+      copilotAuthHint: "Stores the credential DSH's github-copilot route and the usage card read. This plugin never touches model traffic.",
+      copilotSignedIn: "Signed in",
+      copilotSignedOut: "Not signed in",
+      copilotPending: "Waiting for authorization…",
+      copilotCode: "Code: {t}",
+      copilotOpen: "Open {t}",
+      copilotLogin: "Sign in",
+      copilotLogout: "Sign out",
+      copilotModelCount: "Models: {t}",
     };
     const ZH = {
       nav: "Cursor",
@@ -117,6 +127,16 @@ window.__ModuleLoader__.load({
       usageSectionCursor: "Cursor 用量",
       usageSectionCopilot: "Copilot 用量",
       usageNoCopilot: "未登录 Copilot：先在设置里完成 Copilot 登录，或设置 GITHUB_TOKEN。",
+      copilotAuthTitle: "Copilot 登录",
+      copilotAuthHint: "登录写入 DSH github-copilot 路由和用量卡读取的同一份凭据；本插件不碰模型流量。",
+      copilotSignedIn: "已登录",
+      copilotSignedOut: "未登录",
+      copilotPending: "等待授权…",
+      copilotCode: "验证码：{t}",
+      copilotOpen: "打开 {t}",
+      copilotLogin: "登录",
+      copilotLogout: "退出",
+      copilotModelCount: "模型：{t}",
     };
 
     let localeRuntime;
@@ -176,6 +196,9 @@ window.__ModuleLoader__.load({
       },
       panelTitle: { margin: 0, fontSize: 13, fontWeight: 700, color: "var(--dsw-alias-label-primary)" },
       panelBody: { display: "flex", flexDirection: "column", gap: 12 },
+      authRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 500, color: "var(--dsw-alias-label-primary)", flexWrap: "wrap" },
+      authCode: { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 17, fontWeight: 700, letterSpacing: 1.5, color: "var(--dsw-alias-label-primary)" },
+      authLink: { color: "var(--dsw-alias-brand-primary)", fontSize: 13, wordBreak: "break-all" },
     };
 
     async function request(path, method = "GET", body) {
@@ -485,6 +508,105 @@ window.__ModuleLoader__.load({
       ] });
     }
 
+    /**
+     * Settings card: GitHub Copilot device-flow sign-in. The backend controller
+     * (`src/copilot-auth.ts`) is ported from @lujianjun19/dsh-llm-github-copilot
+     * so that plugin can be retired; the credential record id is unchanged.
+     */
+    function CopilotAuthCard() {
+      const [status, setStatus] = useState();
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState();
+
+      const load = useCallback(() => request("/copilot/status").then(
+        (next) => { setStatus(next); setError(void 0); return next; },
+        (cause) => { setError(cause instanceof Error ? cause.message : String(cause)); return void 0; },
+      ), []);
+      useEffect(() => { void load(); }, [load]);
+
+      // The backend polls GitHub; this only watches the flow state.
+      const pending = status?.state === "pending";
+      useEffect(() => {
+        if (!pending) return undefined;
+        const timer = setInterval(() => { void load(); }, 2500);
+        return () => clearInterval(timer);
+      }, [pending, load]);
+
+      const run = (action) => {
+        setBusy(true);
+        setError(void 0);
+        return action().then(
+          (next) => { setStatus(next); },
+          (cause) => { setError(cause instanceof Error ? cause.message : String(cause)); },
+        ).finally(() => setBusy(false));
+      };
+
+      const authenticated = status?.state === "authenticated";
+      const dotColor = !status
+        ? "var(--dsw-alias-label-tertiary)"
+        : authenticated ? TONE_COLORS.ok : pending ? TONE_COLORS.warning : TONE_COLORS.danger;
+      const label = !status
+        ? text("usageLoading")
+        : authenticated ? text("copilotSignedIn")
+        : pending ? text("copilotPending")
+        : text("copilotSignedOut");
+
+      return jsxs("div", {
+        style: css.card,
+        children: [
+          jsxs("div", {
+            style: css.row,
+            children: [
+              jsx("h3", { style: css.h3, children: text("copilotAuthTitle") }),
+              authenticated
+                ? jsx(Button, {
+                    variant: "outline",
+                    disabled: busy,
+                    onClick: () => { void run(() => request("/copilot/logout", "POST", {})); },
+                    children: text("copilotLogout"),
+                  })
+                : jsx(Button, {
+                    variant: "primary",
+                    disabled: busy || pending,
+                    onClick: () => { void run(() => request("/copilot/login", "POST", {})); },
+                    children: text("copilotLogin"),
+                  }),
+            ],
+          }),
+          jsx("p", { style: css.hint, children: text("copilotAuthHint") }),
+          error ? jsx("p", { role: "alert", style: css.error, children: error }) : null,
+          jsxs("div", {
+            style: css.authRow,
+            children: [
+              jsx("span", { style: { ...css.pillDot, background: dotColor } }),
+              jsx("span", { children: label }),
+              authenticated && status?.modelCount
+                ? jsx("span", { style: css.meta, children: tp("copilotModelCount", String(status.modelCount)) })
+                : null,
+              !authenticated && status?.message
+                ? jsx("span", { style: css.meta, children: status.message })
+                : null,
+            ],
+          }),
+          pending && status?.userCode
+            ? jsxs("div", {
+                style: css.windows,
+                children: [
+                  jsx("span", { style: css.authCode, children: status.userCode }),
+                  jsx("a", {
+                    href: status.verificationUri,
+                    target: "_blank",
+                    rel: "noreferrer",
+                    style: css.authLink,
+                    children: tp("copilotOpen", status.verificationUri ?? ""),
+                  }),
+                ],
+              })
+            : null,
+        ],
+      });
+    }
+
     function CursorSettings() {
       useLocaleRevision();
       const [status, setStatus] = useState();
@@ -572,6 +694,8 @@ window.__ModuleLoader__.load({
               jsx("p", { style: css.hint, children: text("usageModeHint") }),
             ],
           }),
+
+          jsx(CopilotAuthCard, {}),
 
           jsxs("div", {
             style: css.card,
