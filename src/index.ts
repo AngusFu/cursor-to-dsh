@@ -30,6 +30,8 @@ export interface Config {
   cwd?: string | Volatile<string>;
   apiKeyProfiles?: ApiKeyProfile[] | Volatile<ApiKeyProfile[]>;
   activeKeyId?: string | Volatile<string>;
+  /** Usage pill visibility: auto (only Cursor models), always, off. */
+  usageDisplay?: string | Volatile<string>;
 }
 
 const ApiKeyProfileSchema = Schema.object({
@@ -45,6 +47,7 @@ export const Config: Schema<Config> = Schema.object({
     .description("Cursor API key profiles. Add/select/store keys in Settings → Cursor (or /cursor-key-* commands).")
     .volatile(),
   activeKeyId: Schema.string().default("default").description("Which apiKeyProfiles.id is used for new Cursor agents.").volatile(),
+  usageDisplay: Schema.string().default("auto").description("Cursor usage pill: auto (only on Cursor models), always, or off.").volatile(),
   apiKeyEnv: Schema.string().role("credential-ref").default("CURSOR_API_KEY").description("Legacy single-key credential / env name (used when apiKeyProfiles is empty).").volatile(),
   apiKey: Schema.string().role("secret").description("Legacy inline Cursor API key; prefer Settings → Cursor."),
   context: Schema.string().default("min").description("Cursor context tier: min, max, or an offered value such as 300k."),
@@ -128,7 +131,7 @@ export function apply(ctx: Context, config: Config): void {
   (ctx as any).llm.registerAdapter([PROVIDER_ID], adapter);
   ctx.effect(() => () => closeAllCursorSessions(), "cursor sessions");
 
-  registerHostApi(ctx, getConfig);
+  registerHostApi(ctx, getConfig, resolveApiKey);
   registerCursorCommands(ctx, getConfig);
 
   void resolveApiKey()

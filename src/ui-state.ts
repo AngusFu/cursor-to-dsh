@@ -12,10 +12,12 @@ import {
   normalizeProfiles,
   profileCredentialRef,
 } from "./keys.ts";
+import type { UsageMode } from "./quota.ts";
 
 export type CursorUiConfig = KeyConfig & {
   apiKeyProfiles?: ApiKeyProfile[] | { get?: () => ApiKeyProfile[] };
   activeKeyId?: string | { get?: () => string };
+  usageDisplay?: string | { get?: () => string };
 };
 
 export type ProfileStatus = {
@@ -31,6 +33,7 @@ export type ProfileStatus = {
 type Overlay = {
   activeKeyId?: string;
   apiKeyProfiles?: ApiKeyProfile[];
+  usageDisplay?: UsageMode;
 };
 
 const overlay: Overlay = {};
@@ -54,12 +57,34 @@ export function readActiveKeyId(config: CursorUiConfig | undefined): string {
 export function applyOverlay(next: Overlay): void {
   if (next.activeKeyId !== undefined) overlay.activeKeyId = next.activeKeyId;
   if (next.apiKeyProfiles !== undefined) overlay.apiKeyProfiles = next.apiKeyProfiles;
+  if (next.usageDisplay !== undefined) overlay.usageDisplay = next.usageDisplay;
 }
 
 /** Test hook. */
 export function resetOverlay(): void {
   delete overlay.activeKeyId;
   delete overlay.apiKeyProfiles;
+  delete overlay.usageDisplay;
+}
+
+const USAGE_MODES: UsageMode[] = ["auto", "always", "off"];
+
+/** Usage pill visibility: auto = only on Cursor models, always = always, off = never. */
+export function readUsageDisplay(config: CursorUiConfig | undefined): UsageMode {
+  if (overlay.usageDisplay) return overlay.usageDisplay;
+  const raw = cfgString(config?.usageDisplay).trim().toLowerCase();
+  return (USAGE_MODES.find((mode) => mode === raw) ?? "auto") as UsageMode;
+}
+
+export async function setUsageDisplay(
+  ctx: any,
+  config: CursorUiConfig | undefined,
+  modeRaw: string,
+): Promise<UsageMode> {
+  const mode = USAGE_MODES.find((item) => item === String(modeRaw).trim().toLowerCase());
+  if (!mode) throw new Error("Usage display must be one of: auto, always, off");
+  await persistConfig(ctx, { usageDisplay: mode });
+  return readUsageDisplay(config);
 }
 
 export function settingsNamespace(ctx: any): string {
@@ -221,6 +246,7 @@ export function uiSnapshot(ctx: any, config: CursorUiConfig | undefined) {
   return (async () => ({
     activeKeyId: readActiveKeyId(config),
     profiles: await listProfileStatus(ctx, config),
+    usageDisplay: readUsageDisplay(config),
     settingsNs: settingsNamespace(ctx),
   }))();
 }

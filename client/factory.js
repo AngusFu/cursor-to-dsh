@@ -12,7 +12,7 @@ window.__ModuleLoader__.load({
     const React = require("react");
     const { jsx, jsxs } = require("react/jsx-runtime");
     const { Button, Input, StateDot } = require("@deepseek-ai/dsh-client-ui-primitives");
-    const { useEffect, useState, useSyncExternalStore } = React;
+    const { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } = React;
 
     const API = "/api/cursor-to-dsh";
     const NS = "cursor-to-dsh";
@@ -42,6 +42,24 @@ window.__ModuleLoader__.load({
       commandHint: "Chat commands: /cursor-keys, /cursor-key-set, /cursor-key-use, /cursor-key-add, /cursor-key-remove.",
       pluginVersion: "Plugin version:",
       error: "Error",
+      usageTitle: "Usage",
+      usagePanelTitle: "Cursor usage",
+      usageHint: "Read from this host's Cursor sign-in; a dashboard API key alone is not enough.",
+      usagePillLabel: "Usage pill",
+      usageModeAuto: "Auto",
+      usageModeAlways: "Always",
+      usageModeOff: "Off",
+      usageModeHint: "Auto shows the pill only while a Cursor model is selected.",
+      usageResetsAt: "Resets {t}",
+      usageUpdatedAt: "Updated {t}",
+      usageSource: "Source",
+      usageLoading: "Loading…",
+      usageNoData: "Cursor returned no usage windows.",
+      usageNoSignIn: "No Cursor sign-in on this host. Open the Cursor desktop app once, or set CURSOR_ACCESS_TOKEN.",
+      winAuto: "Auto mode",
+      winApi: "API",
+      winTotal: "Total",
+      winGrok: "Grok Bot",
     };
     const ZH = {
       nav: "Cursor",
@@ -67,6 +85,24 @@ window.__ModuleLoader__.load({
       commandHint: "对话命令：/cursor-keys、/cursor-key-set、/cursor-key-use、/cursor-key-add、/cursor-key-remove。",
       pluginVersion: "插件版本：",
       error: "错误",
+      usageTitle: "用量",
+      usagePanelTitle: "Cursor 用量",
+      usageHint: "读取本机 Cursor 登录态；只存 Dashboard API Key 拿不到用量。",
+      usagePillLabel: "用量胶囊",
+      usageModeAuto: "自动",
+      usageModeAlways: "常驻",
+      usageModeOff: "关闭",
+      usageModeHint: "自动：仅在选中 Cursor 模型时显示胶囊。",
+      usageResetsAt: "重置于 {t}",
+      usageUpdatedAt: "更新于 {t}",
+      usageSource: "来源",
+      usageLoading: "加载中…",
+      usageNoData: "Cursor 未返回用量数据。",
+      usageNoSignIn: "本机未找到 Cursor 登录态：先打开一次 Cursor 桌面端，或设置 CURSOR_ACCESS_TOKEN。",
+      winAuto: "自动模式",
+      winApi: "API",
+      winTotal: "合计",
+      winGrok: "Grok Bot",
     };
 
     let localeRuntime;
@@ -97,6 +133,34 @@ window.__ModuleLoader__.load({
       label: { fontSize: 12, fontWeight: 500, color: "var(--dsw-alias-label-secondary)" },
       error: { margin: 0, whiteSpace: "pre-wrap", color: "var(--dsw-alias-label-error, var(--dsw-alias-state-danger-label))" },
       versionLink: { color: "var(--dsw-alias-brand-primary)" },
+      windows: { display: "flex", flexDirection: "column", gap: 14 },
+      winRow: { display: "flex", flexDirection: "column", gap: 5 },
+      winHead: { display: "flex", alignItems: "center", gap: 10 },
+      winLabel: { fontSize: 13, fontWeight: 600, color: "var(--dsw-alias-label-secondary)", width: 78, flex: "none" },
+      winPct: { fontSize: 14, fontWeight: 700, color: "var(--dsw-alias-label-primary)", width: 52, textAlign: "right", flex: "none", fontVariantNumeric: "tabular-nums" },
+      barTrack: { flex: 1, height: 8, borderRadius: 8, background: "var(--dsw-alias-border-l2)", overflow: "hidden", minWidth: 40 },
+      barFill: { display: "block", height: "100%", borderRadius: 8, transition: "width .3s ease" },
+      usageFooter: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 11, color: "var(--dsw-alias-label-tertiary)", flexWrap: "wrap" },
+      modeRow: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
+      pillWrap: { position: "relative", display: "inline-flex" },
+      pill: {
+        display: "inline-flex", alignItems: "center", gap: 8, height: 26, padding: "0 10px",
+        border: "1px solid var(--dsw-alias-border-l2)", borderRadius: 999,
+        background: "var(--dsw-alias-bg-layer-1)", color: "var(--dsw-alias-label-primary)",
+        fontSize: 12, fontWeight: 600, lineHeight: "24px", cursor: "pointer",
+        fontVariantNumeric: "tabular-nums",
+      },
+      pillDot: { width: 7, height: 7, borderRadius: "50%", flex: "none" },
+      pillBar: { width: 42, height: 5, borderRadius: 5, background: "var(--dsw-alias-border-l2)", overflow: "hidden", flex: "none" },
+      usagePanel: {
+        position: "absolute", bottom: "calc(100% + 10px)", right: 0, width: 300,
+        display: "flex", flexDirection: "column", gap: 12, padding: 14,
+        border: "1px solid var(--dsw-alias-border-l2)", borderRadius: 12,
+        background: "var(--dsw-alias-bg-layer-1)", zIndex: 60,
+        boxShadow: "0 12px 32px rgba(0,0,0,.28)",
+      },
+      panelTitle: { margin: 0, fontSize: 13, fontWeight: 700, color: "var(--dsw-alias-label-primary)" },
+      panelBody: { display: "flex", flexDirection: "column", gap: 12 },
     };
 
     async function request(path, method = "GET", body) {
@@ -116,6 +180,208 @@ window.__ModuleLoader__.load({
         throw new Error(payload?.error ?? `Cursor settings request failed (HTTP ${response.status})`);
       }
       return payload.value;
+    }
+
+    /* ---------- usage (Settings card + conversation pill) ---------- */
+
+    const USAGE_POLL_MS = 60_000;
+    const MODES = ["auto", "always", "off"];
+    const MODE_KEYS = { auto: "usageModeAuto", always: "usageModeAlways", off: "usageModeOff" };
+    const WIN_KEYS = { auto: "winAuto", api: "winApi", total: "winTotal", grok_bot: "winGrok" };
+    const TONE_COLORS = {
+      ok: "var(--dsw-alias-label-success, #3fa66a)",
+      warning: "var(--dsw-alias-label-warning, #b46900)",
+      danger: "var(--dsw-alias-label-danger, #c93c3c)",
+    };
+
+    const readUsage = (force) => request(`/usage${force ? "?force=1" : ""}`);
+    const writeUsageMode = (mode) => request("/usage/display", "POST", { mode });
+
+    function tp(key, value) {
+      return text(key).replace("{t}", value);
+    }
+
+    function formatTime(iso) {
+      if (!iso) return "";
+      const date = new Date(iso);
+      if (!Number.isFinite(date.getTime())) return "";
+      return date.toLocaleString();
+    }
+
+    function formatPct(pct) {
+      const value = Math.max(0, Math.min(100, Number(pct) || 0));
+      return `${Math.round(value * 10) / 10}%`;
+    }
+
+    const toneColor = (tone) => TONE_COLORS[tone] ?? TONE_COLORS.ok;
+
+    function UsageRow({ win }) {
+      const pct = Math.max(0, Math.min(100, Number(win.usedPct) || 0));
+      return jsxs("div", {
+        style: css.winRow,
+        children: [
+          jsxs("div", {
+            style: css.winHead,
+            children: [
+              jsx("span", { style: css.winLabel, children: text(WIN_KEYS[win.id] ?? "winTotal") }),
+              jsx("span", {
+                style: css.barTrack,
+                children: jsx("span", { style: { ...css.barFill, width: `${pct}%`, background: toneColor(win.tone) } }),
+              }),
+              jsx("span", { style: css.winPct, children: formatPct(pct) }),
+            ],
+          }),
+          win.resetsAt ? jsx("span", { style: css.meta, children: tp("usageResetsAt", formatTime(win.resetsAt)) }) : null,
+        ],
+      });
+    }
+
+    /** Rows / hint / error for one usage snapshot; shared by the card and the pill panel. */
+    function UsageBody({ usage, error }) {
+      if (error) return jsx("p", { role: "alert", style: css.error, children: error });
+      if (!usage) return jsx("p", { style: css.hint, children: text("usageLoading") });
+      if (usage.status === "unavailable") return jsx("p", { style: css.hint, children: text("usageNoSignIn") });
+      if (usage.status === "error") return jsx("p", { role: "alert", style: css.error, children: usage.error ?? text("error") });
+      const windows = usage.windows ?? [];
+      if (!windows.length) return jsx("p", { style: css.hint, children: text("usageNoData") });
+      return jsx("div", {
+        style: css.windows,
+        children: windows.map((win) => jsx(UsageRow, { win }, win.id)),
+      });
+    }
+
+    function UsageFooter({ usage }) {
+      if (!usage || usage.status !== "available") return null;
+      return jsxs("div", {
+        style: css.usageFooter,
+        children: [
+          jsx("span", { children: usage.fetchedAt ? tp("usageUpdatedAt", formatTime(usage.fetchedAt)) : "" }),
+          usage.sourceLabel ? jsx("span", { children: `${text("usageSource")}: ${usage.sourceLabel}` }) : null,
+        ],
+      });
+    }
+
+    /**
+     * One snapshot source for both surfaces.
+     * `shouldPoll(usage)` decides the 60s timer; the page pauses it while hidden and
+     * refreshes immediately when it becomes visible again.
+     */
+    function useUsage(shouldPoll) {
+      const [usage, setUsage] = useState();
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState();
+
+      const load = useCallback((force) => {
+        setBusy(true);
+        return readUsage(force).then(
+          (next) => { setUsage(next); setError(void 0); return next; },
+          (cause) => { setError(cause instanceof Error ? cause.message : String(cause)); return void 0; },
+        ).finally(() => setBusy(false));
+      }, []);
+
+      useEffect(() => {
+        let alive = true;
+        readUsage(false).then(
+          (next) => { if (alive) { setUsage(next); setError(void 0); } },
+          (cause) => { if (alive) setError(cause instanceof Error ? cause.message : String(cause)); },
+        );
+        return () => { alive = false; };
+      }, []);
+
+      const poll = shouldPoll(usage);
+      useEffect(() => {
+        if (!poll) return undefined;
+        const refresh = () => { if (!document.hidden) void load(false); };
+        const timer = setInterval(refresh, USAGE_POLL_MS);
+        document.addEventListener("visibilitychange", refresh);
+        return () => { clearInterval(timer); document.removeEventListener("visibilitychange", refresh); };
+      }, [poll, load]);
+
+      const setMode = useCallback((mode) => {
+        setBusy(true);
+        return writeUsageMode(mode).then(
+          (next) => { setUsage(next); setError(void 0); return next; },
+          (cause) => { setError(cause instanceof Error ? cause.message : String(cause)); return void 0; },
+        ).finally(() => setBusy(false));
+      }, []);
+
+      return { usage, busy, error, load, setMode };
+    }
+
+    const EMPTY_DIRECTORY_STORE = { subscribe: () => () => {}, getSnapshot: () => null };
+
+    /** Cursor usage pill in the conversation input (slot: conversation.input.right). */
+    function UsagePill({ directory }) {
+      const store = useMemo(
+        () => (directory && directory.subscribe && directory.getSnapshot
+          ? { subscribe: directory.subscribe.bind(directory), getSnapshot: directory.getSnapshot.bind(directory) }
+          : EMPTY_DIRECTORY_STORE),
+        [directory],
+      );
+      const dirState = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+      const { usage, busy, error, load } = useUsage((value) => Boolean(value) && value.mode !== "off");
+      const [open, setOpen] = useState(false);
+      const wrapRef = useRef(null);
+
+      useEffect(() => {
+        if (!open) return undefined;
+        const onDown = (event) => {
+          if (wrapRef.current && !wrapRef.current.contains(event.target)) setOpen(false);
+        };
+        document.addEventListener("pointerdown", onDown);
+        return () => document.removeEventListener("pointerdown", onDown);
+      }, [open]);
+
+      if (!usage || usage.mode === "off") return null;
+      // auto: only while this session is on a Cursor model (no directory store = show it).
+      if (usage.mode === "auto" && directory && dirState?.current?.provider !== "cursor") return null;
+
+      const windows = usage.status === "available" ? usage.windows ?? [] : [];
+      const main = windows.find((win) => win.id === "total") ?? windows.find((win) => win.id === "auto") ?? windows[0];
+      const pct = main ? Math.max(0, Math.min(100, Number(main.usedPct) || 0)) : 0;
+      const color = toneColor(main?.tone);
+      const title = usage.status === "available"
+        ? `${text("usagePanelTitle")} · ${windows.map((win) => `${text(WIN_KEYS[win.id] ?? "winTotal")} ${formatPct(win.usedPct)}`).join(" · ")}`
+        : (usage.error ?? text("usageNoSignIn"));
+
+      return jsxs("div", { style: css.pillWrap, ref: wrapRef, children: [
+        jsx("button", {
+          type: "button",
+          style: { ...css.pill, ...(open ? { borderColor: "var(--dsw-alias-brand-primary)" } : {}) },
+          title,
+          "aria-expanded": open,
+          onClick: () => setOpen((value) => !value),
+          children: [
+            jsx("span", { style: { ...css.pillDot, background: usage.status === "available" ? color : TONE_COLORS.danger } }),
+            jsx("span", {
+              style: css.pillBar,
+              children: jsx("span", { style: { ...css.barFill, width: `${pct}%`, background: color } }),
+            }),
+            jsx("span", { children: usage.status === "available" ? formatPct(pct) : "—" }),
+          ],
+        }),
+        open
+          ? jsxs("div", {
+              style: css.usagePanel,
+              children: [
+                jsxs("div", {
+                  style: css.usageFooter,
+                  children: [
+                    jsx("p", { style: css.panelTitle, children: text("usagePanelTitle") }),
+                    jsx(Button, {
+                      variant: "outline",
+                      disabled: busy,
+                      onClick: () => { void load(true); },
+                      children: text("refresh"),
+                    }),
+                  ],
+                }),
+                jsx("div", { style: css.panelBody, children: jsx(UsageBody, { usage, error }) }),
+                jsx(UsageFooter, { usage }),
+              ],
+            })
+          : null,
+      ] });
     }
 
     function CursorSettings() {
@@ -162,11 +428,49 @@ window.__ModuleLoader__.load({
       };
 
 
+      const usageState = useUsage(() => false);
+
       return jsxs("section", {
         style: css.section,
         children: [
           jsx("h2", { style: css.title, children: text("title") }),
           jsx("p", { style: css.intro, children: text("intro") }),
+
+          jsxs("div", {
+            style: css.card,
+            children: [
+              jsxs("div", {
+                style: css.row,
+                children: [
+                  jsx("h3", { style: css.h3, children: text("usageTitle") }),
+                  jsx(Button, {
+                    variant: "outline",
+                    disabled: usageState.busy,
+                    onClick: () => { void usageState.load(true); },
+                    children: text("refresh"),
+                  }),
+                ],
+              }),
+              jsx("p", { style: css.hint, children: text("usageHint") }),
+              jsx(UsageBody, { usage: usageState.usage, error: usageState.error }),
+              jsx(UsageFooter, { usage: usageState.usage }),
+              jsxs("div", {
+                style: css.modeRow,
+                children: [
+                  jsx("span", { style: css.label, children: text("usagePillLabel") }),
+                  ...MODES.map((mode) =>
+                    jsx(Button, {
+                      variant: (usageState.usage?.mode ?? "auto") === mode ? "primary" : "outline",
+                      disabled: usageState.busy,
+                      onClick: () => { void usageState.setMode(mode); },
+                      children: text(MODE_KEYS[mode]),
+                    }, mode),
+                  ),
+                ],
+              }),
+              jsx("p", { style: css.hint, children: text("usageModeHint") }),
+            ],
+          }),
 
           jsxs("div", {
             style: css.card,
@@ -347,6 +651,24 @@ window.__ModuleLoader__.load({
           CursorSettings,
         ),
       );
+
+      // Usage pill beside the composer; modelDirectories comes from the shell, so a scope
+      // that never becomes ready only costs the pill, never the settings page.
+      ctx.inject(["modelDirectories"], (mctx) => {
+        mctx.slots.inject("conversation.input.right", () =>
+          mctx.slots.register(
+            {
+              name: "conversation.input.right",
+              id: "cursor-to-dsh-usage",
+              order: 900,
+              inject: (sessionId) => ({
+                directory: mctx.modelDirectories?.directoryFor?.(sessionId)?.store,
+              }),
+            },
+            UsagePill,
+          ),
+        );
+      });
     }
 
     exports.apply = apply;

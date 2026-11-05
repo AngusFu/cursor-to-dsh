@@ -16,10 +16,11 @@ DeepSeek Harness (DSH) plugin that registers Cursor as the `cursor` LLM provider
 | `src/usage.ts` | Cursor usage -> DSH disjoint buckets, Cursor overhead calibration |
 | `src/sdk.ts` | Cursor SDK access (agent, catalog, ripgrep path) |
 | `src/keys.ts` | Multi API-key profiles + active key resolution |
-| `src/ui-state.ts` | Settings/API overlay: profiles, active key |
-| `src/host-api.ts` | Authenticated `/api/cursor-to-dsh/*` for Settings → Cursor |
+| `src/ui-state.ts` | Settings/API overlay: profiles, active key, pill display mode |
+| `src/quota.ts` | Cursor subscription usage -> UI windows (login-state token ladder, 2-min cache) |
+| `src/host-api.ts` | Authenticated `/api/cursor-to-dsh/*` for Settings → Cursor (keys + usage) |
 | `src/commands.ts` | Slash commands: `/cursor-key-*` |
-| `client/factory.js` | Settings → Cursor browser page (copied to `lib/client.js`) |
+| `client/factory.js` | Settings → Cursor browser page + conversation usage pill (copied to `lib/client.js`) |
 | `cordis.patch.yml` | Bundle layer that inserts the `llm-cursor` row |
 | `scripts/patch-cursor-sdk.mjs` | postinstall: patches the locked `@cursor/sdk` ESM build (see below) |
 

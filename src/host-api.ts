@@ -5,11 +5,14 @@
 import type { CursorUiConfig } from "./ui-state.ts";
 import {
   addProfile,
+  readUsageDisplay,
   removeProfile,
   setProfileKey,
+  setUsageDisplay,
   uiSnapshot,
   useProfile,
 } from "./ui-state.ts";
+import { fetchCursorUsage } from "./quota.ts";
 
 const API_ROOT = "/api/cursor-to-dsh";
 
@@ -30,13 +33,29 @@ async function readJson(request: Request): Promise<any> {
   }
 }
 
-export function registerHostApi(ctx: any, getConfig: () => CursorUiConfig): void {
+export function registerHostApi(
+  ctx: any,
+  getConfig: () => CursorUiConfig,
+  resolveStoredKey?: () => Promise<string | undefined>,
+): void {
   const fetchAction = (action: (request: Request) => Promise<unknown>) => async (request: Request) => {
     try {
       return jsonResponse(200, { ok: true, value: await action(request) });
     } catch (error) {
       return jsonResponse(500, { ok: false, error: error instanceof Error ? error.message : String(error) });
     }
+  };
+
+  /** Usage payload for the Settings card and the conversation usage pill. */
+  const usageSnapshot = async (force: boolean): Promise<Record<string, unknown>> => {
+    let storedKey: string | undefined;
+    try {
+      storedKey = resolveStoredKey ? await resolveStoredKey() : undefined;
+    } catch {
+      storedKey = undefined;
+    }
+    const snapshot = await fetchCursorUsage({ storedKey: storedKey ?? null, force });
+    return { mode: readUsageDisplay(getConfig()), ...snapshot };
   };
 
   ctx.inject(["connection"], (cctx: any) => {
@@ -93,6 +112,22 @@ export function registerHostApi(ctx: any, getConfig: () => CursorUiConfig): void
             const body = await readJson(request);
             await useProfile(ctx, getConfig(), String(body.id ?? ""));
             return uiSnapshot(ctx, getConfig());
+          }),
+        }),
+        cctx.connection.fetch.register({
+          path: `${API_ROOT}/usage`,
+          methods: ["GET"],
+          requestBody: "buffered",
+          fetch: fetchAction(async (request) => usageSnapshot(/[?&]force=1(&|$)/.test(request.url ?? ""))),
+        }),
+        cctx.connection.fetch.register({
+          path: `${API_ROOT}/usage/display`,
+          methods: ["POST"],
+          requestBody: "buffered",
+          fetch: fetchAction(async (request) => {
+            const body = await readJson(request);
+            await setUsageDisplay(ctx, getConfig(), String(body.mode ?? ""));
+            return usageSnapshot(false);
           }),
         }),
       ];

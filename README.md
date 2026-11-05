@@ -12,7 +12,8 @@
 
 ## 特点
 
-- **官方接口**：只用 Cursor 官方 `@cursor/sdk` 和你自己的 API Key，不逆向私有协议、不读 Cursor IDE 登录态；通过 DSH 的 `ctx.llm.registerAdapter` 注册，不改宿主代码。
+- **官方接口**：聊天只用 Cursor 官方 `@cursor/sdk` 和你自己的 API Key，不改宿主代码；通过 DSH 的 `ctx.llm.registerAdapter` 注册。
+- **用量 UI**：设置 → Cursor 的「用量」卡片 + 输入框旁用量胶囊（自动 / 常驻 / 关闭），显示 Auto / API / 合计 / Grok Bot 百分比与重置时间。这部分走 Cursor 用量接口，凭据取本机 Cursor 登录态（`state.vscdb` / `auth.json`），API Key 单独拿不到用量。
 - **工具归 DSH**：默认关闭 Cursor 内置工具；读写文件、执行命令都由 DSH 执行，沿用沙箱和审批。
 - **多 Key UI**：设置 → Cursor 添加 / 保存 / 选用 / 删除；也可用 `/cursor-key-*` 命令。
 - **缓存复用**：每个 DSH 会话对应一个 Cursor agent，只发新增内容；工具结果回填到同一个 run 继续。
