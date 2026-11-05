@@ -35,6 +35,7 @@ window.__ModuleLoader__.load({
       addLabel: "Label",
       add: "Add",
       refresh: "Refresh",
+      refreshing: "Refreshing…",
       busy: "Working…",
       placeholderKey: "Paste Cursor API key",
       placeholderId: "work",
@@ -101,6 +102,7 @@ window.__ModuleLoader__.load({
       addLabel: "显示名",
       add: "添加",
       refresh: "刷新",
+      refreshing: "刷新中…",
       busy: "处理中…",
       placeholderKey: "粘贴 Cursor API Key",
       placeholderId: "work",
@@ -389,12 +391,12 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState(false);
       const [error, setError] = useState();
 
-      const load = useCallback((force) => {
-        setBusy(true);
-        return readUsage(force, provider).then(
+      const load = useCallback((manual = false) => {
+        if (manual) setBusy(true);
+        return readUsage(manual, provider).then(
           (next) => { setUsage(next); setError(void 0); return next; },
           (cause) => { setError(cause instanceof Error ? cause.message : String(cause)); return void 0; },
-        ).finally(() => setBusy(false));
+        ).finally(() => { if (manual) setBusy(false); });
       }, [provider]);
 
       useEffect(() => {
@@ -450,8 +452,9 @@ window.__ModuleLoader__.load({
                 type: "button",
                 style: css.compactBtn,
                 disabled: state.busy,
+                "aria-busy": state.busy,
                 onClick: () => { void state.load(true); },
-                children: text("refresh"),
+                children: text(state.busy ? "refreshing" : "refresh"),
               }),
             ],
           }),
@@ -566,10 +569,13 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState(false);
       const [error, setError] = useState();
 
-      const load = useCallback(() => request("/copilot/status").then(
-        (next) => { setStatus(next); setError(void 0); return next; },
-        (cause) => { setError(cause instanceof Error ? cause.message : String(cause)); return void 0; },
-      ), []);
+      const load = useCallback((manual = false) => {
+        if (manual) setBusy(true);
+        return request("/copilot/status").then(
+          (next) => { setStatus(next); setError(void 0); return next; },
+          (cause) => { setError(cause instanceof Error ? cause.message : String(cause)); return void 0; },
+        ).finally(() => { if (manual) setBusy(false); });
+      }, []);
       useEffect(() => { void load(); }, [load]);
 
       // The backend polls GitHub; this only watches the flow state.
@@ -612,8 +618,9 @@ window.__ModuleLoader__.load({
                   jsx(Button, {
                     variant: "outline",
                     disabled: busy,
-                    onClick: () => { void load(); },
-                    children: text("refresh"),
+                    "aria-busy": busy,
+                    onClick: () => { void load(true); },
+                    children: text(busy ? "refreshing" : "refresh"),
                   }),
                   authenticated
                     ? jsx(Button, {
@@ -761,7 +768,7 @@ window.__ModuleLoader__.load({
                 style: css.row,
                 children: [
                   jsx("h3", { style: css.h3, children: text("keysTitle") }),
-                  jsx(Button, { variant: "outline", disabled: busy, onClick: () => { void run(refresh); }, children: text("refresh") }),
+                  jsx(Button, { variant: "outline", disabled: busy, "aria-busy": busy, onClick: () => { void run(refresh); }, children: text(busy ? "refreshing" : "refresh") }),
                 ],
               }),
               jsx("p", { style: css.hint, children: text("keysHint") }),
