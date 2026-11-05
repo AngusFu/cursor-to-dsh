@@ -62,6 +62,12 @@ window.__ModuleLoader__.load({
       winPremium: "Premium",
       winChat: "Chat",
       winCompletions: "Completions",
+      winShortAuto: "Auto",
+      winShortTotal: "Total",
+      winShortGrok: "Grok",
+      winShortPremium: "Premium",
+      winShortChat: "Chat",
+      winShortCompletions: "Comp",
       usageUnlimited: "Unlimited",
       usagePlan: "Plan",
       usageSectionCursor: "Cursor usage",
@@ -122,6 +128,12 @@ window.__ModuleLoader__.load({
       winPremium: "高级请求",
       winChat: "对话",
       winCompletions: "补全",
+      winShortAuto: "自动",
+      winShortTotal: "合计",
+      winShortGrok: "Grok",
+      winShortPremium: "高级",
+      winShortChat: "对话",
+      winShortCompletions: "补全",
       usageUnlimited: "不限",
       usagePlan: "套餐",
       usageSectionCursor: "Cursor 用量",
@@ -209,7 +221,7 @@ window.__ModuleLoader__.load({
         color: "inherit", font: "inherit", fontSize: 12.5, lineHeight: 1.6, whiteSpace: "nowrap",
         cursor: "pointer", minWidth: 0, maxWidth: "46vw", overflow: "hidden",
       },
-      pillUnit: { color: "var(--dsw-alias-label-tertiary)" },
+      pillText: { overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 },
       pillDot: { width: 7, height: 7, borderRadius: "50%", flex: "none" },
       usagePanel: {
         position: "absolute", bottom: "calc(100% + 10px)", right: 0, zIndex: 100,
@@ -258,6 +270,11 @@ window.__ModuleLoader__.load({
     const WIN_KEYS = {
       auto: "winAuto", api: "winApi", total: "winTotal", grok_bot: "winGrok",
       premium: "winPremium", chat: "winChat", completions: "winCompletions",
+    };
+    /** Compact labels for the collapsed pill (panel keeps the full ones). */
+    const WIN_SHORT_KEYS = {
+      auto: "winShortAuto", total: "winShortTotal", grok_bot: "winShortGrok",
+      premium: "winShortPremium", chat: "winShortChat", completions: "winShortCompletions",
     };
     /** Quota provider id -> display block. */
     const PROVIDERS = {
@@ -497,11 +514,14 @@ window.__ModuleLoader__.load({
         (windows.length > 1 && windows[1] !== main ? windows[1] : undefined);
       const winLine = (win) =>
         `${text(WIN_KEYS[win.id] ?? "winTotal")} ${win.unlimited ? text("usageUnlimited") : formatPct(win.usedPct)}`;
+      const shortLine = (win) =>
+        `${text(WIN_SHORT_KEYS[win.id] ?? WIN_KEYS[win.id] ?? "winTotal")} ${win.unlimited ? text("usageUnlimited") : formatPct(win.usedPct)}`;
+      const brand = activeProvider === "copilot" ? "Copilot" : "Cursor";
       const triggerText = !usage
         ? "…"
         : usage.status !== "available"
           ? "—"
-          : [text(sectionKey), main && winLine(main), second && winLine(second)]
+          : [brand, main && shortLine(main), second && shortLine(second)]
               .filter(Boolean)
               .join(" · ");
       const title = usage?.status === "available"
@@ -515,7 +535,7 @@ window.__ModuleLoader__.load({
           title,
           "aria-expanded": open,
           onClick: () => setOpen((value) => !value),
-          children: triggerText,
+          children: jsx("span", { style: css.pillText, children: triggerText }),
         }),
         open
           ? jsxs("div", {
