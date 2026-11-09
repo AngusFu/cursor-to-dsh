@@ -17,6 +17,7 @@
  */
 import { isRejectedParams, modelParams, resolveModelId, smallerContext, workingContext, type Param } from "./models.ts";
 import {
+  estimateTextTokens,
   estimateTranscript,
   fingerprint,
   hash,
@@ -33,6 +34,9 @@ import {
 import { ERROR_CODES, Reply } from "./reply.ts";
 import type { Transcript } from "./transcript.ts";
 import { calibrateOverhead, cursorOverhead, runUsage } from "./usage.ts";
+import type { CheckpointStoreLike } from "./context/checkpoint.ts";
+import { runCompaction } from "./context/compact.ts";
+import { SUMMARY_PREFIX } from "./context/summarizer.ts";
 
 const SLOTS_PER_KEY = 3;
 const IDLE_CLOSE_MS = 20 * 60_000;
@@ -73,6 +77,12 @@ class CursorSession {
   systemPrompt = "";
   /** Fingerprints of the messages Cursor has seen, including its own replies. */
   seen: string[] = [];
+  /** DSH history index Cursor no longer holds verbatim; folded into `summary`. */
+  compactedAt = 0;
+  /** What replaced that history. Prepend to the next incremental send. */
+  summary = "";
+  /** Size of `summary` in estimated tokens, for the rolling budget. */
+  summaryTokens = 0;
   busy = false;
   closed = false;
   private wakers: (() => void)[] = [];
@@ -232,8 +242,26 @@ export function planIncrement(s: CursorSession | undefined, messages: any[]): Pl
   return { kind: "send", text: added.map(incrementText).filter(Boolean).join("\n\n"), images: imagesOf(added) };
 }
 
+/**
+ * Long-session context management, as configured in `paseo.json`.
+ *
+ * The summariser is any DSH provider the user names, so compaction does not
+ * have to burn Cursor quota. `store` is the Cursor checkpoint store that the
+ * rewrite goes through.
+ */
+export interface CompactDeps {
+  store: CheckpointStoreLike;
+  /** Rolling token budget for what Cursor still holds verbatim. */
+  budgetTokens: number;
+  /** Turns kept verbatim regardless of budget. */
+  keepTurns: number;
+  summarize: (history: string, opts?: { signal?: AbortSignal }) => Promise<string>;
+}
+
 export interface TurnDeps {
   createAgent: (opts: any) => Promise<any>;
+  /** Absent = every session behaves exactly as it did before compaction existed. */
+  compact?: CompactDeps;
 }
 
 /** Auxiliary calls (titles, compaction) carry the session id but must not touch its agent. */
@@ -329,6 +357,63 @@ async function continueWithNewTools(
   return true;
 }
 
+/**
+ * Shrink what Cursor still holds when the retained window outgrows the budget.
+ *
+ * Returns the summary to prepend to this turn's text, or "" when nothing
+ * happened. A compaction that fails must be indistinguishable from one never
+ * attempted: the DSH history is untouched either way, so the next turn simply
+ * tries again.
+ *
+ * Only the incremental branch calls this. The first send re-renders everything
+ * anyway, and tool results must go back to Cursor unaltered.
+ */
+async function maybeCompact(opts: {
+  s: CursorSession;
+  t: Transcript;
+  modelId: string;
+  cwd: string;
+  deps?: CompactDeps;
+  signal?: AbortSignal;
+}): Promise<string> {
+  const { s, t, modelId, cwd, deps, signal } = opts;
+  const agentId = String(s.agent?.agentId ?? "");
+  if (!deps || s.closed || !agentId) return "";
+
+  const retained =
+    estimateTranscript(t.systemPrompt, t.tools, t.messages.slice(s.compactedAt)) +
+    s.summaryTokens +
+    cursorOverhead(modelId);
+  if (retained <= deps.budgetTokens) return "";
+
+  let outcome;
+  try {
+    outcome = await runCompaction({
+      store: deps.store,
+      agentId,
+      cwd,
+      messages: t.messages,
+      compactedAt: s.compactedAt,
+      keepTurns: deps.keepTurns,
+      previousSummary: s.summary,
+      summarize: (history) => deps.summarize(history, { signal }),
+    });
+  } catch (err) {
+    // Compaction is an optimisation; failing it must never cost the user a turn.
+    debug(`compaction failed key=${s.key.slice(0, 12)}: ${err instanceof Error ? err.message : String(err)}`);
+    return "";
+  }
+  if (!outcome) return "";
+
+  s.compactedAt = outcome.keepFrom;
+  s.summary = outcome.summary;
+  s.summaryTokens = estimateTextTokens(outcome.summary);
+  debug(
+    `compacted key=${s.key.slice(0, 12)} keepFrom=${outcome.keepFrom} turns=${outcome.keepFrom} summaryTokens=${s.summaryTokens}`,
+  );
+  return `${SUMMARY_PREFIX}\n${outcome.summary}`;
+}
+
 /** Run one DSH model call on a persistent Cursor session; every chunk goes to `reply`. */
 export async function runTurn(opts: {
   model: { id: string; cursorParameters?: unknown };
@@ -392,7 +477,10 @@ export async function runTurn(opts: {
       freshRun = true;
     } else if (plan.kind === "send") {
       s.busy = true;
-      const text = [note, addedToolsNote(s, t.tools), plan.text].filter(Boolean).join("\n\n");
+      // Between runs only: a run in flight writes its own checkpoint when it
+      // ends and would undo the rewrite.
+      const summary = await maybeCompact({ s, t, modelId, cwd, deps: deps.compact, signal });
+      const text = [summary, note, addedToolsNote(s, t.tools), plan.text].filter(Boolean).join("\n\n");
       s.startRun(await send(s, text, plan.images, syncTools(s, t.tools)));
       s.systemPrompt = t.systemPrompt;
     } else if (note || s.toolsKey !== toolsKeyOf(t.tools)) {

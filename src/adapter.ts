@@ -10,7 +10,7 @@ import { LlmAdapter, LlmError } from "@deepseek-ai/dsh-llm";
 import { FALLBACK_MODELS, PROVIDER_ID, contextWindow, modelNames, reasoningInfo, type CatalogModel } from "./models.ts";
 import type { Image } from "./prompt.ts";
 import { ChunkQueue, Reply } from "./reply.ts";
-import { debug, runTurn, sessionKeyFor } from "./session.ts";
+import { debug, runTurn, sessionKeyFor, type CompactDeps } from "./session.ts";
 import { imageRefs, readRequest } from "./transcript.ts";
 
 const CATALOG_TTL_MS = 10 * 60_000;
@@ -27,6 +27,8 @@ export interface AdapterDeps {
   readImage?: (ref: any, signal?: AbortSignal) => Promise<Image | undefined>;
   /** Called once a live catalog proves the key works; pays the SDK's per-process setup early. */
   prewarm?: (opts: { apiKey: string; modelId: string }) => void;
+  /** Long-session context management; absent = compaction is off. */
+  compact?: CompactDeps;
 }
 
 export class CursorAdapter extends LlmAdapter {
@@ -80,7 +82,7 @@ export class CursorAdapter extends LlmAdapter {
       apiKey,
       sessionKey: sessionKeyFor(sessionId, transcript, options.purpose),
       cwd: this.deps.cwdFor(sessionId),
-      deps: { createAgent: this.deps.createAgent },
+      deps: { createAgent: this.deps.createAgent, compact: this.deps.compact },
       reply: new Reply(queue),
     });
     yield* queue;

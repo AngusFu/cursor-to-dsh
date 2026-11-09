@@ -17,8 +17,10 @@ import { registerHostApi } from "./host-api.ts";
 import { type ApiKeyProfile, type KeyConfig, resolveActiveApiKey } from "./keys.ts";
 import { PROVIDER_ID, setContextPreference } from "./models.ts";
 import { createCursorAgent, listCursorModels, prewarmCursor } from "./sdk.ts";
-import { closeAllCursorSessions, debug } from "./session.ts";
+import { closeAllCursorSessions, debug, type CompactDeps } from "./session.ts";
 import { readActiveKeyId, readProfiles, type CursorUiConfig } from "./ui-state.ts";
+import type { CheckpointStoreLike } from "./context/checkpoint.ts";
+import { MAX_SUMMARY_TOKENS, collectSummaryText, renderSummaryMessages } from "./context/summarizer.ts";
 
 export const name = "cursor-to-dsh";
 export const inject = ["llm"];
@@ -33,6 +35,32 @@ export interface Config {
   activeKeyId?: string | Volatile<string>;
   /** Usage pill visibility: auto (only Cursor models), always, off. */
   usageDisplay?: string | Volatile<string>;
+  /**
+   * Long-session context management: in-place Cursor checkpoint rewrite plus a
+   * summariser for the dropped prefix. Off by default — the summariser and the
+   * rewrite are opt-in because both change what the model can see.
+   */
+  contextManagement?: ContextManagementConfig;
+}
+
+/**
+ * `paseo.json` → plugin entry `cursor-to-dsh` → `contextManagement`.
+ *
+ * The summariser model is deliberately independent of the session's model: any
+ * registered DSH provider may be named here, so compaction does not have to
+ * burn Cursor quota or spawn a throwaway Cursor agent.
+ */
+export interface ContextManagementConfig {
+  /** Master switch. Off = every session behaves exactly as it does today. */
+  enabled: boolean;
+  /** Provider route used to summarise the dropped prefix. Empty = follow the session. */
+  summarizerProvider: string;
+  /** Model for that provider. Empty = the provider's default. */
+  summarizerModel: string;
+  /** Soft token budget for the retained window. */
+  budgetTokens: number;
+  /** Turns kept verbatim regardless of budget. */
+  keepTurns: number;
 }
 
 const ApiKeyProfileSchema = Schema.object({
@@ -53,6 +81,31 @@ export const Config: Schema<Config> = Schema.object({
   apiKey: Schema.string().role("secret").description("Legacy inline Cursor API key; prefer Settings → Cursor."),
   context: Schema.string().default("min").description("Cursor context tier: min, max, or an offered value such as 300k."),
   cwd: Schema.string().description("Cursor agent working directory; default is the session's directory."),
+  contextManagement: Schema.object({
+    enabled: Schema.boolean()
+      .default(false)
+      .description("Rewrite the Cursor checkpoint in place when a session outgrows budgetTokens. Off by default."),
+    summarizerProvider: Schema.string()
+      .default("")
+      .description("Provider route that summarises the dropped prefix (e.g. deepseek). Empty = use the session's own provider. Any registered DSH provider works — it does not have to be Cursor."),
+    summarizerModel: Schema.string()
+      .default("")
+      .description("Model for summarizerProvider. Empty = that provider's default. Independent of the session's model, so compaction need not burn Cursor quota."),
+    budgetTokens: Schema.number()
+      .default(180_000)
+      .description("Estimated tokens of retained history that triggers a rewrite."),
+    keepTurns: Schema.number()
+      .default(1)
+      .description("Turns kept verbatim no matter how small the budget."),
+  })
+    .default({
+      enabled: false,
+      summarizerProvider: "",
+      summarizerModel: "",
+      budgetTokens: 180_000,
+      keepTurns: 1,
+    })
+    .description("Long-session context management. Set in paseo.json; off unless enabled."),
 }) as any;
 
 export function apply(ctx: Context, config: Config): void {
@@ -118,6 +171,61 @@ export function apply(ctx: Context, config: Config): void {
     ? undefined
     : (opts: { apiKey: string; modelId: string }) => void prewarmCursor(opts);
 
+  /**
+   * Long-session context management, off unless the user asked for it.
+   *
+   * The summariser runs through DSH itself, so it may name any registered
+   * provider — compaction need not burn Cursor quota. The rewrite goes through
+   * the public checkpoint store; no SDK patching is involved.
+   */
+  let platform: Promise<any> | undefined;
+  const getPlatform = (): Promise<any> =>
+    (platform ??= import("@cursor/sdk").then((sdk) => sdk.createAgentPlatform()));
+  const checkpointStore: CheckpointStoreLike = {
+    loadLatest: (agentId) => getPlatform().then((p) => p.checkpointStore.loadLatest(agentId)),
+    saveCheckpoint: (agentId, checkpoint) =>
+      getPlatform().then((p) => p.checkpointStore.saveCheckpoint(agentId, checkpoint)),
+  };
+
+  const summarizerModels = new Map<string, string>();
+  const management = config?.contextManagement;
+  const summarise = async (
+    history: string,
+    opts?: { signal?: AbortSignal; sessionModel?: string },
+  ): Promise<string> => {
+    const provider = (management?.summarizerProvider || PROVIDER_ID).trim();
+    let model = (management?.summarizerModel ?? "").trim();
+    // No summariser of our own: borrow the session's model for Cursor, or ask
+    // the named provider for its first model.
+    if (!model && provider === PROVIDER_ID) model = opts?.sessionModel ?? "";
+    if (!model) {
+      model = summarizerModels.get(provider) ?? "";
+      if (!model) {
+        const listed: any[] = (await (ctx as any).llm.listModels(provider)) ?? [];
+        model = String(listed[0]?.id ?? "");
+        if (model) summarizerModels.set(provider, model);
+      }
+    }
+    if (!model) throw new Error(`no model available for summarizer provider "${provider}"`);
+    const chunks = (ctx as any).llm.stream({
+      provider,
+      model,
+      messages: renderSummaryMessages({ history }),
+      maxTokens: MAX_SUMMARY_TOKENS,
+      signal: opts?.signal,
+    });
+    return collectSummaryText(chunks);
+  };
+
+  const compact: CompactDeps | undefined = management?.enabled
+    ? {
+        store: checkpointStore,
+        budgetTokens: management.budgetTokens,
+        keepTurns: management.keepTurns,
+        summarize: summarise,
+      }
+    : undefined;
+
   const adapter = new CursorAdapter({
     createAgent: createCursorAgent,
     listModels: listCursorModels,
@@ -125,6 +233,7 @@ export function apply(ctx: Context, config: Config): void {
     cwdFor,
     readImage,
     prewarm,
+    compact,
   });
   (ctx as any).llm.registerConfigurableProviders([
     { provider: PROVIDER_ID, displayName: "Cursor", settingsNs: (ctx as any).fiber?.entry?.options.id ?? name, settingsPath: [] },
