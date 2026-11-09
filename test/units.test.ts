@@ -22,6 +22,14 @@ test("the first send puts the system prompt and history in front of Cursor", () 
   assert.doesNotMatch(renderTranscript("", [{ role: "user", content: "x" }]), /AGENTS/);
 });
 
+test("renderTranscript uses acp tagged wire text for user messages", () => {
+  const m = { role: "user", content: "plain" };
+  const tagged = new Map([[fingerprint(m), '<acp tokens="1" type="text">m00001</acp>\nplain']]);
+  const text = renderTranscript("SYS", [m], tagged);
+  assert.match(text, /<acp /);
+  assert.match(text, /### user\n<acp/);
+});
+
 test("fingerprints ignore what Cursor never saw", () => {
   const a = { role: "assistant", content: [{ type: "text", text: "ok" }] };
   assert.equal(fingerprint(a), fingerprint({ ...a, content: [{ type: "thinking", thinking: "hm" }, ...a.content] }));

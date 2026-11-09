@@ -26,24 +26,27 @@ export type CursorUiConfig = KeyConfig & {
  * the settings layer never has to import the plugin entry.
  */
 export interface ContextManagementConfig {
-  /** Master switch. Off = every session behaves exactly as it does today. */
+  /** Billion-context / acp session management (compress tools, budget, standing prompt). */
   enabled: boolean;
-  /** Provider route used to summarise the dropped prefix. Empty = follow the session. */
-  summarizerProvider: string;
-  /** Model for that provider. Empty = the provider's default. */
-  summarizerModel: string;
-  /** Soft token budget for the retained window. */
-  budgetTokens: number;
-  /** Turns kept verbatim regardless of budget. */
-  keepTurns: number;
+  /** acp-kernel soft-protect: recent message count (billion-context default 5). */
+  preserveRecentMessages: number;
+  /** acp-kernel soft-protect: recent token tail (default 5000). */
+  preserveRecentTokens: number;
+  /** Tokens reserved for model output when computing §8 input budget. */
+  outputReserve: number;
+  /** Extra margin on top of outputReserve. */
+  safetyMargin: number;
+  /** Hard preflight attempts per session generation before CURSOR_CONTEXT_BUDGET_EXCEEDED. */
+  preflightMaxAttempts: number;
 }
 
 export const CONTEXT_DEFAULTS: ContextManagementConfig = {
   enabled: false,
-  summarizerProvider: "",
-  summarizerModel: "",
-  budgetTokens: 180_000,
-  keepTurns: 1,
+  preserveRecentMessages: 5,
+  preserveRecentTokens: 5_000,
+  outputReserve: 8_192,
+  safetyMargin: 8_192,
+  preflightMaxAttempts: 3,
 };
 
 export type ProfileStatus = {
@@ -126,19 +129,30 @@ export function settingsNamespace(ctx: any): string {
  * so a hand-edited YAML that dropped a key cannot produce a NaN budget.
  */
 export function readContextManagement(config: unknown): ContextManagementConfig {
-  // `Config` in index.ts carries Volatile<> wrappers the schema types do not,
-  // and this only ever reads one plain field off it.
-  const raw = {
-    ...CONTEXT_DEFAULTS,
-    ...(overlay.contextManagement ?? cfgGet((config as any)?.contextManagement) ?? {}),
+  const raw = overlay.contextManagement ?? cfgGet((config as any)?.contextManagement) ?? {};
+  const r = raw as Partial<ContextManagementConfig>;
+  const num = (key: keyof ContextManagementConfig, min: number, fallback: number) => {
+    const v = Math.floor(Number(r[key]));
+    return Number.isFinite(v) && v >= min ? v : fallback;
   };
-  const budget = Math.floor(Number(raw.budgetTokens));
+  const legacyKeep = Math.floor(Number((raw as { keepTurns?: number }).keepTurns));
+  const preserveRecentMessages = Number.isFinite(legacyKeep) && legacyKeep >= 1 && r.preserveRecentMessages === undefined
+    ? legacyKeep
+    : num("preserveRecentMessages", 1, CONTEXT_DEFAULTS.preserveRecentMessages);
+  const legacyEnabled = (raw as { enabled?: unknown }).enabled;
+  const enabled =
+    typeof r.enabled === "boolean"
+      ? r.enabled
+      : typeof legacyEnabled === "boolean"
+        ? legacyEnabled
+        : CONTEXT_DEFAULTS.enabled;
   return {
-    enabled: Boolean(raw.enabled),
-    summarizerProvider: String(raw.summarizerProvider ?? "").trim(),
-    summarizerModel: String(raw.summarizerModel ?? "").trim(),
-    budgetTokens: Number.isFinite(budget) && budget > 0 ? budget : CONTEXT_DEFAULTS.budgetTokens,
-    keepTurns: Math.max(1, Math.floor(Number(raw.keepTurns)) || CONTEXT_DEFAULTS.keepTurns),
+    enabled,
+    preserveRecentMessages,
+    preserveRecentTokens: num("preserveRecentTokens", 256, CONTEXT_DEFAULTS.preserveRecentTokens),
+    outputReserve: num("outputReserve", 1024, CONTEXT_DEFAULTS.outputReserve),
+    safetyMargin: num("safetyMargin", 1024, CONTEXT_DEFAULTS.safetyMargin),
+    preflightMaxAttempts: num("preflightMaxAttempts", 1, CONTEXT_DEFAULTS.preflightMaxAttempts),
   };
 }
 
@@ -148,15 +162,21 @@ export async function setContextManagement(
   config: CursorUiConfig | undefined,
   patch: Partial<ContextManagementConfig>,
 ): Promise<ContextManagementConfig> {
-  const merged = { ...readContextManagement(config), ...patch };
-  const budget = Math.floor(Number(merged.budgetTokens));
-  if (!Number.isFinite(budget) || budget <= 0) throw new Error("budgetTokens must be a positive number of tokens");
-  merged.budgetTokens = budget;
-  const keep = Math.floor(Number(merged.keepTurns));
-  if (!Number.isFinite(keep) || keep < 1) throw new Error("keepTurns must be at least 1");
-  merged.keepTurns = keep;
-  merged.summarizerProvider = String(merged.summarizerProvider ?? "").trim();
-  merged.summarizerModel = String(merged.summarizerModel ?? "").trim();
+  const current = readContextManagement(config);
+  const merged: ContextManagementConfig = {
+    enabled: typeof patch.enabled === "boolean" ? patch.enabled : current.enabled,
+    preserveRecentMessages: Math.floor(Number(patch.preserveRecentMessages ?? current.preserveRecentMessages)) || current.preserveRecentMessages,
+    preserveRecentTokens: Math.floor(Number(patch.preserveRecentTokens ?? current.preserveRecentTokens)) || current.preserveRecentTokens,
+    outputReserve: Math.floor(Number(patch.outputReserve ?? current.outputReserve)) || current.outputReserve,
+    safetyMargin: Math.floor(Number(patch.safetyMargin ?? current.safetyMargin)) || current.safetyMargin,
+    preflightMaxAttempts:
+      Math.floor(Number(patch.preflightMaxAttempts ?? current.preflightMaxAttempts)) || current.preflightMaxAttempts,
+  };
+  if (merged.preserveRecentMessages < 1) throw new Error("preserveRecentMessages must be at least 1");
+  if (merged.preserveRecentTokens < 256) throw new Error("preserveRecentTokens must be at least 256");
+  if (merged.outputReserve < 1024) throw new Error("outputReserve must be at least 1024");
+  if (merged.safetyMargin < 1024) throw new Error("safetyMargin must be at least 1024");
+  if (merged.preflightMaxAttempts < 1) throw new Error("preflightMaxAttempts must be at least 1");
   await persistConfig(ctx, { contextManagement: merged });
   return readContextManagement(config);
 }
@@ -310,6 +330,28 @@ export async function useProfile(ctx: any, config: CursorUiConfig | undefined, i
   if (!profiles.some((p) => p.id === id)) throw new Error(`Profile "${id}" not found`);
   await persistConfig(ctx, { activeKeyId: id });
   return listProfileStatus(ctx, { ...config, activeKeyId: id });
+}
+
+/** Drop legacy contextManagement keys from persisted settings (keepTurns, enabled, …). */
+export async function migrateLegacyContextSettings(ctx: any, config: CursorUiConfig | undefined): Promise<boolean> {
+  const settings = ctx?.get?.("settings");
+  if (!settings?.read) return false;
+  const ns = settingsNamespace(ctx);
+  let doc: any;
+  try {
+    doc = await settings.read(ns);
+  } catch {
+    return false;
+  }
+  const raw = doc?.contextManagement;
+  if (!raw || typeof raw !== "object") return false;
+  const legacy = "keepTurns" in raw || "budgetTokens" in raw || "summarizerProvider" in raw || "summarizerModel" in raw;
+  if (!legacy) return false;
+  const { keepTurns: _k, budgetTokens: _b, summarizerProvider: _p, summarizerModel: _m, ...rest } = raw as Record<string, unknown>;
+  await persistConfig(ctx, {
+    contextManagement: readContextManagement({ ...(config as object), contextManagement: rest }),
+  });
+  return true;
 }
 
 export function uiSnapshot(ctx: any, config: CursorUiConfig | undefined) {

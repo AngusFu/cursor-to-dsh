@@ -29,6 +29,8 @@ export interface AdapterDeps {
   prewarm?: (opts: { apiKey: string; modelId: string }) => void;
   /** Long-session context management; absent = compaction is off. */
   compact?: CompactDeps;
+  /** Live gate for billion-context / acp features (settings volatile). */
+  contextEnabled?: () => boolean;
 }
 
 export class CursorAdapter extends LlmAdapter {
@@ -82,7 +84,11 @@ export class CursorAdapter extends LlmAdapter {
       apiKey,
       sessionKey: sessionKeyFor(sessionId, transcript, options.purpose),
       cwd: this.deps.cwdFor(sessionId),
-      deps: { createAgent: this.deps.createAgent, compact: this.deps.compact },
+      deps: {
+        createAgent: this.deps.createAgent,
+        compact: this.deps.contextEnabled?.() === false ? undefined : this.deps.compact,
+      },
+      contextWindowTokens: contextWindow(model),
       reply: new Reply(queue),
     });
     yield* queue;

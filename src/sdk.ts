@@ -82,7 +82,7 @@ export function resetPrewarm(): void {
   warming = undefined;
 }
 
-async function deleteCursorAgent(id: string, opts: any): Promise<void> {
+export async function deleteCursorAgent(id: string, opts: { apiKey: string; local?: { cwd?: string } }): Promise<void> {
   const { Agent } = await import("@cursor/sdk");
   await Agent.delete(id, opts);
 }

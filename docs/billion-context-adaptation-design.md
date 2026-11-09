@@ -304,7 +304,7 @@ MVP 默认与 DSH 原生 compaction 共存，不全局关闭：
 - `src/host-api.ts`、`client/factory.js`：认证状态查询、压缩统计和手动控制。
 - `package.json`：经核验后锁定 acp-kernel；DSH host package 仍为 peer + dev dependency。
 
-配置建议为新 `contextManagement` 区块，默认关闭，包括 soft threshold、目标 fill、输出余量、preflight 限额、原文 offload、storage、owner 和保留策略。保留既有 `context`、`DSH_CURSOR_*`、`cursor` 路由及 `llm-cursor` row 语义不变。
+配置建议为 `contextManagement` 的 acp 保护区 + §8 预算字段（`preserveRecentMessages`、`preserveRecentTokens`、`outputReserve`、`safetyMargin`、`preflightMaxAttempts`）；压缩区间由 ledger refs / `cursor_context_status` 提供，不再用全局 `keepTurns` 或 `enabled` 开关。保留既有 `context`、`DSH_CURSOR_*`、`cursor` 路由及 `llm-cursor` row 语义不变。
 
 ## 13. 实施阶段与验收门槛
 

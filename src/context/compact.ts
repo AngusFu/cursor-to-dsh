@@ -29,6 +29,8 @@ export interface PlanInput {
   readonly compactedAt: number;
   readonly keepTurns: number;
   readonly previousSummary: string;
+  /** Optional inclusive ref range; must lie inside the droppable window. */
+  readonly refRange?: { startRef: string; endRef: string; startIndex: number; endIndex: number };
 }
 
 /**
@@ -40,10 +42,20 @@ export interface PlanInput {
  */
 export function planCompaction(input: PlanInput): CompactionPlan | undefined {
   const keep = Math.max(1, Math.floor(input.keepTurns) || 1);
-  const keepFrom = Math.max(0, input.messages.length - keep);
+  let keepFrom = Math.max(0, input.messages.length - keep);
   if (keepFrom <= input.compactedAt) return undefined;
 
-  const drop = Array.from(input.messages).slice(input.compactedAt, keepFrom);
+  let dropStart = input.compactedAt;
+  let dropEnd = keepFrom;
+  if (input.refRange) {
+    const { startIndex, endIndex } = input.refRange;
+    if (startIndex < input.compactedAt || endIndex >= keepFrom || startIndex > endIndex) return undefined;
+    dropStart = startIndex;
+    dropEnd = endIndex + 1;
+  }
+
+  const drop = Array.from(input.messages).slice(dropStart, dropEnd);
+  if (input.refRange) keepFrom = dropEnd;
   const history = [input.previousSummary, ...drop.map(incrementText)]
     .filter(Boolean)
     .join("\n\n")
@@ -87,15 +99,62 @@ export async function runCompaction(input: CompactionRun): Promise<CompactionOut
   }
   if (!summary) return undefined;
 
-  const needles = needlesFrom([...plan.drop.map(incrementText), input.previousSummary].filter(Boolean));
-  const result = await compactCheckpoint({
+  return applyCompactionRewrite({
     store: input.store,
     agentId: input.agentId,
     cwd: input.cwd,
-    keepTurns: Math.max(1, Math.floor(input.keepTurns) || 1),
-    needles,
+    keepTurns: input.keepTurns,
+    summary,
+    keepFrom: plan.keepFrom,
+    needles: [...plan.drop.map(incrementText), input.previousSummary].filter(Boolean),
+  });
+}
+
+export interface HostCompactionRun {
+  readonly store: CheckpointStoreLike;
+  readonly agentId: string;
+  readonly cwd: string;
+  readonly keepTurns: number;
+  /** DSH already produced this; do not call the summariser again. */
+  readonly summary: string;
+  readonly keepFrom: number;
+  readonly needles: readonly string[];
+}
+
+/**
+ * Shrink a Cursor checkpoint to match a DSH host compaction that already
+ * landed. The summary text is taken from DSH; only the blob rewrite runs here.
+ */
+export async function runHostCompaction(input: HostCompactionRun): Promise<CompactionOutcome | undefined> {
+  const summary = input.summary.trim();
+  if (!summary || input.needles.length === 0) return undefined;
+  return applyCompactionRewrite({
+    store: input.store,
+    agentId: input.agentId,
+    cwd: input.cwd,
+    keepTurns: input.keepTurns,
+    summary,
+    keepFrom: input.keepFrom,
+    needles: input.needles,
+  });
+}
+
+async function applyCompactionRewrite(opts: {
+  store: CheckpointStoreLike;
+  agentId: string;
+  cwd: string;
+  keepTurns: number;
+  summary: string;
+  keepFrom: number;
+  needles: readonly string[];
+}): Promise<CompactionOutcome | undefined> {
+  const result = await compactCheckpoint({
+    store: opts.store,
+    agentId: opts.agentId,
+    cwd: opts.cwd,
+    keepTurns: Math.max(1, Math.floor(opts.keepTurns) || 1),
+    needles: opts.needles,
   });
   if (!result.ok) return undefined;
-
-  return { summary, keepFrom: plan.keepFrom };
+  return { summary: opts.summary, keepFrom: opts.keepFrom };
 }

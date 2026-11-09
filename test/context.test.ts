@@ -7,6 +7,8 @@ import {
   payloadHoldsNeedle,
   refHex,
 } from "../src/context/checkpoint.ts";
+import { ACP_SYSTEM_MARKER, acpContextSectionText, acpSystemPromptAddition } from "../src/context/acp-prompts.ts";
+import { registerAcpSystemPrompt } from "../src/context/system-prompt.ts";
 import { planCompaction, runCompaction } from "../src/context/compact.ts";
 import {
   SUMMARY_PREFIX,
@@ -78,6 +80,22 @@ test("planCompaction stops once there is nothing new to fold in", () => {
   assert.equal(planCompaction({ messages, compactedAt: 0, keepTurns: 0, previousSummary: "" })?.keepFrom, 2);
   // Nothing to render means nothing worth sending to the summariser.
   assert.equal(planCompaction({ messages: [], compactedAt: 0, keepTurns: 1, previousSummary: "" }), undefined);
+});
+
+test("planCompaction honours inclusive refRange inside the droppable window", () => {
+  const messages = Array.from({ length: 6 }, (_, i) => user(`message ${i}`));
+  const plan = planCompaction({
+    messages,
+    compactedAt: 0,
+    keepTurns: 2,
+    previousSummary: "",
+    refRange: { startRef: "m00001", endRef: "m00003", startIndex: 1, endIndex: 3 },
+  });
+  assert.ok(plan);
+  assert.equal(plan.drop.length, 3);
+  assert.equal(plan.keepFrom, 4);
+  assert.doesNotMatch(plan.history, /message 0/);
+  assert.match(plan.history, /message 3/);
 });
 
 test("planCompaction folds the previous summary into the history, not into a new one", () => {
@@ -183,6 +201,44 @@ test("collectSummaryText takes only the text the user would read", async () => {
   }
   assert.equal(await collectSummaryText(empty()), "");
   assert.equal(await collectSummaryText((async function* () { yield { type: "reasoning-delta", text: "x" }; })()), "");
+});
+
+test("registerAcpSystemPrompt registers cursor:acp-context only on cursor route", () => {
+  const sections: any[] = [];
+  const ctx = {
+    effect: (fn: () => () => void) => fn(),
+    systemPrompt: {
+      getSectionOrder: () => 3100,
+      section: (section: any) => {
+        sections.push(section);
+        return () => {};
+      },
+    },
+  };
+  registerAcpSystemPrompt(ctx as any, () => true);
+  assert.equal(sections.length, 1);
+  assert.equal(sections[0]!.name, "cursor:acp-context");
+  assert.equal(sections[0]!.text({ modelSelection: { provider: "deepseek" } }), "");
+  assert.match(sections[0]!.text({ modelSelection: { provider: "cursor" } }), /\[acp-context\]/);
+  sections.length = 0;
+  registerAcpSystemPrompt(ctx as any, () => false);
+  assert.equal(sections[0]!.text({ modelSelection: { provider: "cursor" } }), "");
+});
+
+test("acpContextSectionText includes marker and compress tools", () => {
+  const text = acpContextSectionText();
+  assert.match(text, /\[acp-context\]/);
+  assert.match(text, /cursor_context_compress/);
+});
+
+test("acpSystemPromptAddition appends full acp standing prompt once", () => {
+  const once = acpSystemPromptAddition("DSH agent rules");
+  assert.match(once, /\[acp-context\]/);
+  assert.match(once, /cursor_context_compress/);
+  assert.match(once, /ACP TAGS/);
+  assert.ok(once.length > "DSH agent rules".length + 200);
+  assert.equal(acpSystemPromptAddition(once), once);
+  assert.match(acpSystemPromptAddition(`x\n\n${ACP_SYSTEM_MARKER}\ny`), /\[acp-context\]/);
 });
 
 test("the summary prefix marks the block the next turn must carry", () => {

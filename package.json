@@ -66,16 +66,21 @@
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "check": "tsc --noEmit",
     "check:public": "node scripts/check-public.mjs",
+    "live:context": "node --experimental-strip-types scripts/dsh-live-verify.ts",
+    "live:compress": "node --experimental-strip-types scripts/live-compress.ts",
+    "smoke:web": "node --experimental-strip-types scripts/dsh-web-smoke.ts",
     "prepublishOnly": "npm run check && npm test && npm run build && npm run check:public"
   },
   "dependencies": {
-    "@cursor/sdk": "1.3.1"
+    "@cursor/sdk": "1.3.1",
+    "acp-kernel": "0.0.101"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.5",
     "@deepseek-ai/dsh-credentials": "0.2.1-rc.2",
     "@deepseek-ai/dsh-launch-environment": "0.2.1-rc.2",
     "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
     "@deepseek-ai/schemastery": "3.18.5",
     "@types/node": "22.20.5",
     "typescript": "5.9.3"
@@ -88,6 +93,7 @@
     "@deepseek-ai/dsh-launch-environment": ">=0.2.0-rc.2",
     "@deepseek-ai/dsh-llm": ">=0.2.0-rc.2",
     "@deepseek-ai/dsh-settings": ">=0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.2",
     "@deepseek-ai/schemastery": "~3.18.5"
   }
 }

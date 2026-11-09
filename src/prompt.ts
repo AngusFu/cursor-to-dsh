@@ -72,12 +72,19 @@ const TOOL_DISCIPLINE_NOTE = [
 const INSTRUCTIONS_NOTE =
   "The system prompt and context messages below come from the host agent and already include the user's instruction files (AGENTS.md and similar). If Cursor user rules ask you to read such a file first, treat it as already read; do not call a tool for it unless the user asks.";
 
-function renderMessage(m: any): string {
+function wireBody(m: any, tagged?: Map<string, string>): string | undefined {
+  if (!tagged?.size) return undefined;
+  const hit = tagged.get(fingerprint(m));
+  return hit?.trim() || undefined;
+}
+
+function renderMessage(m: any, tagged?: Map<string, string>): string {
+  const wired = wireBody(m, tagged);
   switch (m?.role) {
     case "user":
-      return `### user\n${textOf(m.content)}`;
+      return `### user\n${wired ?? textOf(m.content)}`;
     case "developer":
-      return `### context\n${textOf(m.content)}`;
+      return `### context\n${wired ?? textOf(m.content)}`;
     case "assistant": {
       const parts: string[] = [];
       for (const b of m.content ?? []) {
@@ -93,12 +100,22 @@ function renderMessage(m: any): string {
   }
 }
 
-/** The first send of a session: tool rules, the system prompt, then the history so far. */
-export function renderTranscript(systemPrompt: string | undefined, messages: any[]): string {
+/** Shared header blocks before conversation history on the first Cursor send. */
+export function transcriptPreamble(systemPrompt: string | undefined): string[] {
   const parts = [TOOLS_NOTE, TOOL_DISCIPLINE_NOTE];
   const system = systemPrompt?.trim();
   if (system) parts.push(INSTRUCTIONS_NOTE, system);
-  const history = messages.map(renderMessage).filter(Boolean);
+  return parts;
+}
+
+/** The first send of a session: tool rules, the system prompt, then the history so far. */
+export function renderTranscript(
+  systemPrompt: string | undefined,
+  messages: any[],
+  tagged?: Map<string, string>,
+): string {
+  const parts = transcriptPreamble(systemPrompt);
+  const history = messages.map((m) => renderMessage(m, tagged)).filter(Boolean);
   if (history.length) parts.push("Conversation so far:", ...history);
   return parts.join("\n\n");
 }
@@ -106,6 +123,13 @@ export function renderTranscript(systemPrompt: string | undefined, messages: any
 /** Text Cursor gets for messages sent after the first: context messages keep their label. */
 export function incrementText(m: any): string {
   const text = textOf(m?.content);
+  return m?.role === "developer" && text ? `[context]\n${text}` : text;
+}
+
+/** Like incrementText but prefers acp tagged wire bodies when present. */
+export function incrementWireText(m: any, tagged?: Map<string, string>): string {
+  const wired = wireBody(m, tagged);
+  const text = wired ?? textOf(m?.content);
   return m?.role === "developer" && text ? `[context]\n${text}` : text;
 }
 

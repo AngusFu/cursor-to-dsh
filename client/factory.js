@@ -85,22 +85,31 @@ window.__ModuleLoader__.load({
       copilotLogout: "Sign out",
       copilotModelCount: "Models: {t}",
       ctxTitle: "Long-session context",
-      ctxHint: "When a session grows past its token budget, the plugin rewrites the Cursor checkpoint in place so the model only sees the retained tail, and turns the dropped prefix into a summary. Off by default: nothing changes until you switch it on.",
-      ctxEnabled: "Compaction",
-      ctxOn: "On",
-      ctxOff: "Off",
-      ctxEnabledHint: "On: the next turn rewrites the Cursor checkpoint, falling back to a new agent generation if that fails. Off: sessions behave exactly as they do today.",
-      ctxModelHint: "Provider route and model used to summarise the dropped prefix. Any registered DSH provider may be named here. Leave both blank to summarise with the session's own model, which spends Cursor quota.",
-      ctxProvider: "Provider route",
-      ctxProviderPlaceholder: "e.g. anthropic",
-      ctxModel: "Model",
-      ctxModelPlaceholder: "e.g. claude-sonnet-4-5",
-      ctxBudget: "Token budget",
-      ctxBudgetHint: "Soft token budget for the window kept in the Cursor checkpoint. Once the retained turns exceed it, everything older is compacted away.",
-      ctxKeep: "Turns kept",
-      ctxKeepHint: "How many recent turns stay verbatim no matter how small the budget is.",
+      ctxHint: "Billion-context / acp session management. Turn off for plain Cursor routing only.",
+      ctxEnabled: "Enable long-session context",
+      ctxEnabledHint: "Off disables [acp-context] prompt, compress tools, budget preflight, and /cursor-context-* commands.",
+      ctxPreserveMsgs: "Preserve messages",
+      ctxPreserveMsgsHint: "acp-kernel: recent messages kept verbatim (billion-context default 5).",
+      ctxPreserveTokens: "Preserve tokens",
+      ctxPreserveTokensHint: "acp-kernel: recent token tail kept verbatim (default 5000).",
+      ctxOutputReserve: "Output reserve",
+      ctxOutputReserveHint: "Tokens reserved for model output when computing the input budget (§8).",
+      ctxSafetyMargin: "Safety margin",
+      ctxSafetyMarginHint: "Extra margin subtracted from the effective context window.",
+      ctxPreflightMax: "Preflight attempts",
+      ctxPreflightMaxHint: "Sidecar auto-compress attempts per generation before CURSOR_CONTEXT_BUDGET_EXCEEDED.",
       ctxApply: "Apply",
-      ctxApplied: "Applied. Effective from the next turn.",
+      ctxApplied: "Applied. New default from the next compress.",
+      panelTitle: "Context panel (acp)",
+      panelHint: "Local acp-kernel dashboard text (same layout as billion-context). Live: /cursor-acp-panel in a Cursor session. Below: last persisted sessions from ~/.dsh/cursor-context-ledger.db.",
+      panelLive: "Live",
+      panelPersisted: "Persisted",
+      panelEmpty: "No persisted sessions yet. Run a Cursor session with context tools first.",
+      panelRefresh: "Refresh panel",
+      panelSelect: "Session",
+      ctxFillPill: "Context fill",
+      ctxFillHint: "Retained tokens vs model window (updates after each Cursor turn). Pending = compress scheduled.",
+      ctxFillPending: "compress pending",
     };
     const ZH = {
       nav: "Cursor",
@@ -169,22 +178,31 @@ window.__ModuleLoader__.load({
       copilotLogout: "退出",
       copilotModelCount: "模型：{t}",
       ctxTitle: "长会话上下文",
-      ctxHint: "会话超过 token 预算时，插件会就地改写 Cursor checkpoint，让模型只看到保留下来的近尾部，并把被丢掉的前缀压成摘要。默认关闭：不打开就和现在完全一样。",
-      ctxEnabled: "压缩",
-      ctxOn: "开",
-      ctxOff: "关",
-      ctxEnabledHint: "开：下一轮就地改写 Cursor checkpoint，失败则回退到新建一代 agent。关：所有会话行为与现在一致。",
-      ctxModelHint: "用来把被丢掉的前缀压成摘要的 provider 路由和模型。任何已注册的 DSH provider 都可以填；两个都留空则用会话自己的模型，会消耗 Cursor 额度。",
-      ctxProvider: "Provider 路由",
-      ctxProviderPlaceholder: "例如 anthropic",
-      ctxModel: "模型",
-      ctxModelPlaceholder: "例如 claude-sonnet-4-5",
-      ctxBudget: "Token 预算",
-      ctxBudgetHint: "Cursor checkpoint 里保留窗口的软 token 预算；保留轮次一旦超过它，更早的前缀就会被压掉。",
-      ctxKeep: "保留轮次",
-      ctxKeepHint: "无论预算多小，都原样保留的最近轮次数。",
+      ctxHint: "Billion-context / acp 长会话管理。关闭后仅保留基础 Cursor 路由。",
+      ctxEnabled: "启用长会话上下文",
+      ctxEnabledHint: "关闭后不再注入 [acp-context]、compress 工具、预算 preflight 与 /cursor-context-* 命令。",
+      ctxPreserveMsgs: "保护消息数",
+      ctxPreserveMsgsHint: "acp-kernel：原样保留的最近消息条数（billion-context 默认 5）。",
+      ctxPreserveTokens: "保护 token 数",
+      ctxPreserveTokensHint: "acp-kernel：原样保留的最近 token 尾部长（默认 5000）。",
+      ctxOutputReserve: "输出预留",
+      ctxOutputReserveHint: "计算 §8 输入预算时为模型输出预留的 token。",
+      ctxSafetyMargin: "安全余量",
+      ctxSafetyMarginHint: "从有效 context 窗口再扣除的余量。",
+      ctxPreflightMax: "Preflight 次数",
+      ctxPreflightMaxHint: "每代硬 preflight 上限，超过后报 CURSOR_CONTEXT_BUDGET_EXCEEDED。",
       ctxApply: "应用",
-      ctxApplied: "已应用，从下一轮生效。",
+      ctxApplied: "已应用，从下一次 compress 起生效。",
+      panelTitle: "上下文看板（acp）",
+      panelHint: "本地 acp-kernel 看板文本（版式与 billion-context 一致）。实时：在 Cursor 会话中 /cursor-acp-panel。下方：~/.dsh/cursor-context-ledger.db 里最近持久化的会话。",
+      panelLive: "实时",
+      panelPersisted: "持久化",
+      panelEmpty: "尚无持久化会话。请先跑带上下文工具的 Cursor 会话。",
+      panelRefresh: "刷新看板",
+      panelSelect: "会话",
+      ctxFillPill: "上下文占用",
+      ctxFillHint: "保留 token 占模型窗口比例（每次 Cursor 回合后更新）。pending = 已调度压缩。",
+      ctxFillPending: "压缩排队",
     };
 
     let localeRuntime;
@@ -500,6 +518,52 @@ window.__ModuleLoader__.load({
 
     const EMPTY_DIRECTORY_STORE = { subscribe: () => () => {}, getSnapshot: () => null };
 
+    const FILL_POLL_MS = 12_000;
+
+    /** Context fill % beside the composer (Cursor-routed sessions only). */
+    function ContextFillPill({ sessionId, directory }) {
+      const store = useMemo(
+        () => (directory && directory.subscribe && directory.getSnapshot
+          ? { subscribe: directory.subscribe.bind(directory), getSnapshot: directory.getSnapshot.bind(directory) }
+          : EMPTY_DIRECTORY_STORE),
+        [directory],
+      );
+      const dirState = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+      const modelProvider = directory ? (dirState?.current?.provider ?? null) : null;
+      if (!sessionId || quotaProviderOf(modelProvider) !== "cursor") return null;
+
+      const [fill, setFill] = useState();
+
+      useEffect(() => {
+        if (!sessionId) return undefined;
+        let alive = true;
+        const tick = () =>
+          request(`/context/fill?sessionId=${encodeURIComponent(sessionId)}`)
+            .then((v) => { if (alive) setFill(v); })
+            .catch(() => { if (alive) setFill(void 0); });
+        tick();
+        const id = setInterval(tick, FILL_POLL_MS);
+        return () => { alive = false; clearInterval(id); };
+      }, [sessionId]);
+
+      if (fill?.percent === undefined) return null;
+
+      const title = [
+        text("ctxFillHint"),
+        `${fill.retainedTokens ?? 0} / ${fill.limitTokens ?? "?"} tok`,
+        fill.viewPending ? text("ctxFillPending") : "",
+      ].filter(Boolean).join("\n");
+      const label = fill.viewPending ? `${fill.percent}% · …` : `${fill.percent}%`;
+
+      return jsx("button", {
+        type: "button",
+        style: css.pill,
+        title,
+        "aria-label": text("ctxFillPill"),
+        children: jsx("span", { style: css.pillText, children: label }),
+      });
+    }
+
     /** Cursor usage pill in the conversation input (slot: conversation.input.right). */
     function UsagePill({ directory }) {
       const store = useMemo(
@@ -726,11 +790,12 @@ window.__ModuleLoader__.load({
         setError(void 0);
         setNote(void 0);
         return request("/context", "POST", {
-          enabled: Boolean(cfg?.enabled),
-          summarizerProvider: String(cfg?.summarizerProvider ?? "").trim(),
-          summarizerModel: String(cfg?.summarizerModel ?? "").trim(),
-          budgetTokens: Number(cfg?.budgetTokens),
-          keepTurns: Number(cfg?.keepTurns),
+          enabled: cfg?.enabled === true,
+          preserveRecentMessages: Number(cfg?.preserveRecentMessages),
+          preserveRecentTokens: Number(cfg?.preserveRecentTokens),
+          outputReserve: Number(cfg?.outputReserve),
+          safetyMargin: Number(cfg?.safetyMargin),
+          preflightMaxAttempts: Number(cfg?.preflightMaxAttempts),
         }).then(
           (next) => {
             if (next?.contextManagement) setCfg(next.contextManagement);
@@ -741,7 +806,6 @@ window.__ModuleLoader__.load({
         ).finally(() => setBusy(false));
       };
 
-      const enabled = Boolean(cfg?.enabled);
       const numberField = (key, labelKey) => jsxs("div", {
         style: css.field,
         children: [
@@ -761,61 +825,36 @@ window.__ModuleLoader__.load({
         children: [
           jsx("h3", { style: css.h3, children: text("ctxTitle") }),
           jsx("p", { style: css.hint, children: text("ctxHint") }),
-          error ? jsx("p", { role: "alert", style: css.error, children: error }) : null,
-          note ? jsx("p", { style: css.hint, children: note }) : null,
-          jsxs("div", {
-            style: css.modeRow,
+          jsxs("label", {
+            style: css.row,
             children: [
+              jsx("input", {
+                type: "checkbox",
+                checked: cfg?.enabled === true,
+                disabled: busy,
+                onChange: (event) => set("enabled", event?.target?.checked === true),
+              }),
               jsx("span", { style: css.label, children: text("ctxEnabled") }),
-              ...["on", "off"].map((item) =>
-                jsx(Button, {
-                  variant: (enabled ? "on" : "off") === item ? "primary" : "outline",
-                  disabled: busy,
-                  onClick: () => set("enabled", item === "on"),
-                  children: text(item === "on" ? "ctxOn" : "ctxOff"),
-                }, item),
-              ),
             ],
           }),
           jsx("p", { style: css.hint, children: text("ctxEnabledHint") }),
-          jsx("div", { style: css.sectionDivider }),
-          jsx("p", { style: css.hint, children: text("ctxModelHint") }),
+          error ? jsx("p", { role: "alert", style: css.error, children: error }) : null,
+          note ? jsx("p", { style: css.hint, children: note }) : null,
           jsxs("div", {
             style: css.row,
             children: [
-              jsxs("div", {
-                style: css.field,
-                children: [
-                  jsx("span", { style: css.label, children: text("ctxProvider") }),
-                  jsx(Input, {
-                    value: cfg?.summarizerProvider ?? "",
-                    placeholder: text("ctxProviderPlaceholder"),
-                    disabled: busy,
-                    onChange: (event) => set("summarizerProvider", event?.target?.value ?? ""),
-                  }),
-                ],
-              }),
-              jsxs("div", {
-                style: css.field,
-                children: [
-                  jsx("span", { style: css.label, children: text("ctxModel") }),
-                  jsx(Input, {
-                    value: cfg?.summarizerModel ?? "",
-                    placeholder: text("ctxModelPlaceholder"),
-                    disabled: busy,
-                    onChange: (event) => set("summarizerModel", event?.target?.value ?? ""),
-                  }),
-                ],
-              }),
+              numberField("preserveRecentMessages", "ctxPreserveMsgs"),
+              numberField("preserveRecentTokens", "ctxPreserveTokens"),
+              numberField("outputReserve", "ctxOutputReserve"),
+              numberField("safetyMargin", "ctxSafetyMargin"),
+              numberField("preflightMaxAttempts", "ctxPreflightMax"),
             ],
           }),
-          jsx("div", { style: css.sectionDivider }),
-          jsxs("div", {
-            style: css.row,
-            children: [numberField("budgetTokens", "ctxBudget"), numberField("keepTurns", "ctxKeep")],
-          }),
-          jsx("p", { style: css.hint, children: text("ctxBudgetHint") }),
-          jsx("p", { style: css.hint, children: text("ctxKeepHint") }),
+          jsx("p", { style: css.hint, children: text("ctxPreserveMsgsHint") }),
+          jsx("p", { style: css.hint, children: text("ctxPreserveTokensHint") }),
+          jsx("p", { style: css.hint, children: text("ctxOutputReserveHint") }),
+          jsx("p", { style: css.hint, children: text("ctxSafetyMarginHint") }),
+          jsx("p", { style: css.hint, children: text("ctxPreflightMaxHint") }),
           jsxs("div", {
             style: css.actions,
             children: [
@@ -828,6 +867,106 @@ window.__ModuleLoader__.load({
               }),
             ],
           }),
+        ],
+      });
+    }
+
+  /** Persisted acp panel (Settings); live panel via /cursor-acp-panel in chat. */
+    function ContextPanelCard() {
+      const [sessions, setSessions] = useState([]);
+      const [sessionId, setSessionId] = useState("");
+      const [panel, setPanel] = useState();
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState();
+
+      const loadSessions = () =>
+        request("/context/panel-sessions").then((r) => {
+          const list = r?.sessions ?? [];
+          setSessions(list);
+          if (!sessionId && list[0]) setSessionId(list[0].sessionId);
+        });
+
+      const loadPanel = (id) => {
+        if (!id) return;
+        setBusy(true);
+        setError(void 0);
+        return request(`/context/panel?sessionId=${encodeURIComponent(id)}`)
+          .then(
+            (r) => {
+              if (r?.panel) setPanel(r.panel);
+              else {
+                setPanel(void 0);
+                setError(r?.error ?? "No panel");
+              }
+            },
+            (cause) => {
+              setPanel(void 0);
+              setError(cause instanceof Error ? cause.message : String(cause));
+            },
+          )
+          .finally(() => setBusy(false));
+      };
+
+      useEffect(() => {
+        void loadSessions();
+      }, []);
+
+      useEffect(() => {
+        if (sessionId) void loadPanel(sessionId);
+      }, [sessionId]);
+
+      const panelPre = {
+        whiteSpace: "pre-wrap",
+        fontSize: 11.5,
+        lineHeight: 1.45,
+        maxHeight: 360,
+        overflow: "auto",
+        margin: 0,
+        padding: 10,
+        borderRadius: 8,
+        border: "1px solid color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 12%, transparent)",
+        background: "color-mix(in srgb, var(--dsw-alias-bg-layer-1, Canvas) 60%, transparent)",
+      };
+
+      return jsxs("div", {
+        style: css.card,
+        children: [
+          jsx("h3", { style: css.h3, children: text("panelTitle") }),
+          jsx("p", { style: css.hint, children: text("panelHint") }),
+          error ? jsx("p", { role: "alert", style: css.error, children: error }) : null,
+          sessions.length
+            ? jsxs("div", {
+                style: { ...css.row, alignItems: "center", flexWrap: "wrap" },
+                children: [
+                  jsx("span", { style: css.label, children: text("panelSelect") }),
+                  jsx("select", {
+                    value: sessionId,
+                    disabled: busy,
+                    style: { flex: 1, minWidth: 160, maxWidth: 420, font: "inherit", padding: "6px 8px", borderRadius: 6 },
+                    onChange: (event) => setSessionId(event?.target?.value ?? ""),
+                    children: sessions.map((s) =>
+                      jsx(
+                        "option",
+                        {
+                          value: s.sessionId,
+                          children: `${s.sessionId.slice(0, 18)}… · rev ${s.appliedRevision} · ${new Date(s.updatedAt).toLocaleString()}`,
+                        },
+                        s.sessionId,
+                      ),
+                    ),
+                  }),
+                  jsx(Button, {
+                    variant: "outline",
+                    disabled: busy,
+                    onClick: () => {
+                      void loadSessions().then(() => loadPanel(sessionId));
+                    },
+                    children: text(busy ? "busy" : "panelRefresh"),
+                  }),
+                ],
+              })
+            : jsx("p", { style: css.hint, children: text("panelEmpty") }),
+          panel ? jsx("pre", { style: panelPre, children: panel }) : null,
         ],
       });
     }
@@ -924,6 +1063,8 @@ window.__ModuleLoader__.load({
             initial: status?.contextManagement,
             onSaved: (next) => { if (next) setStatus(next); },
           }),
+
+          jsx(ContextPanelCard, {}),
 
           jsxs("div", {
             style: css.card,
@@ -1108,7 +1249,19 @@ window.__ModuleLoader__.load({
       // Usage pill beside the composer; modelDirectories comes from the shell, so a scope
       // that never becomes ready only costs the pill, never the settings page.
       ctx.inject(["modelDirectories"], (mctx) => {
-        mctx.slots.inject("conversation.input.right", () =>
+        mctx.slots.inject("conversation.input.right", () => {
+          mctx.slots.register(
+            {
+              name: "conversation.input.right",
+              id: "cursor-to-dsh-context-fill",
+              order: 850,
+              inject: (sessionId) => ({
+                sessionId,
+                directory: mctx.modelDirectories?.directoryFor?.(sessionId)?.store,
+              }),
+            },
+            ContextFillPill,
+          );
           mctx.slots.register(
             {
               name: "conversation.input.right",
@@ -1119,8 +1272,8 @@ window.__ModuleLoader__.load({
               }),
             },
             UsagePill,
-          ),
-        );
+          );
+        });
       });
     }
 

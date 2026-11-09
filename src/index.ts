@@ -11,14 +11,21 @@ import Schema from "@deepseek-ai/schemastery";
 
 import { CursorAdapter } from "./adapter.ts";
 import { registerCopilotAuth } from "./copilot-auth.ts";
+import { registerContextCommands } from "./context/commands.ts";
 import { registerCursorCommands } from "./commands.ts";
 import { cfgString } from "./config-value.ts";
 import { registerHostApi } from "./host-api.ts";
+import { registerAcpSystemPrompt } from "./context/system-prompt.ts";
+import { registerContextTools } from "./context/tools.ts";
 import { type ApiKeyProfile, type KeyConfig, resolveActiveApiKey } from "./keys.ts";
 import { PROVIDER_ID, setContextPreference } from "./models.ts";
-import { createCursorAgent, listCursorModels, prewarmCursor } from "./sdk.ts";
-import { closeAllCursorSessions, debug, type CompactDeps } from "./session.ts";
+import { createCursorAgent, deleteCursorAgent, listCursorModels, prewarmCursor } from "./sdk.ts";
+import { kernelTurnPlan } from "./context/kernel.ts";
+import { estimateTranscript } from "./prompt.ts";
+import { contextWindow, resolveModelId } from "./models.ts";
+import { closeAllCursorSessions, debug, sessionSnapshot, type CompactDeps } from "./session.ts";
 import {
+  migrateLegacyContextSettings,
   readActiveKeyId,
   readContextManagement,
   readProfiles,
@@ -27,10 +34,8 @@ import {
 } from "./ui-state.ts";
 export type { ContextManagementConfig } from "./ui-state.ts";
 import type { CheckpointStoreLike } from "./context/checkpoint.ts";
-import { MAX_SUMMARY_TOKENS, collectSummaryText, renderSummaryMessages } from "./context/summarizer.ts";
-
 export const name = "cursor-to-dsh";
-export const inject = ["llm"];
+export const inject = ["llm", "tools", "systemPrompt"];
 
 export interface Config {
   /** Volatile so the settings service gives this plugin a namespace and the Models page lists Cursor. */
@@ -42,11 +47,7 @@ export interface Config {
   activeKeyId?: string | Volatile<string>;
   /** Usage pill visibility: auto (only Cursor models), always, off. */
   usageDisplay?: string | Volatile<string>;
-  /**
-   * Long-session context management: in-place Cursor checkpoint rewrite plus a
-   * summariser for the dropped prefix. Off by default — the summariser and the
-   * rewrite are opt-in because both change what the model can see.
-   */
+  /** acp-kernel preserve zone + §8 budget (billion-context alignment). */
   contextManagement?: ContextManagementConfig;
 }
 
@@ -71,28 +72,32 @@ export const Config: Schema<Config> = Schema.object({
   contextManagement: Schema.object({
     enabled: Schema.boolean()
       .default(false)
-      .description("Rewrite the Cursor checkpoint in place when a session outgrows budgetTokens. Off by default."),
-    summarizerProvider: Schema.string()
-      .default("")
-      .description("Provider route that summarises the dropped prefix (e.g. deepseek). Empty = use the session's own provider. Any registered DSH provider works — it does not have to be Cursor."),
-    summarizerModel: Schema.string()
-      .default("")
-      .description("Model for summarizerProvider. Empty = that provider's default. Independent of the session's model, so compaction need not burn Cursor quota."),
-    budgetTokens: Schema.number()
-      .default(180_000)
-      .description("Estimated tokens of retained history that triggers a rewrite."),
-    keepTurns: Schema.number()
-      .default(1)
-      .description("Turns kept verbatim no matter how small the budget."),
+      .description("Billion-context / acp session management. Off = plain Cursor route only (no compress tools, budget, or [acp-context] prompt)."),
+    preserveRecentMessages: Schema.number()
+      .default(5)
+      .description("acp-kernel: count of recent messages kept verbatim (billion-context default)."),
+    preserveRecentTokens: Schema.number()
+      .default(5_000)
+      .description("acp-kernel: recent token tail kept verbatim."),
+    outputReserve: Schema.number()
+      .default(8_192)
+      .description("Tokens reserved for output when computing §8 input budget."),
+    safetyMargin: Schema.number()
+      .default(8_192)
+      .description("Extra margin subtracted from effective context window."),
+    preflightMaxAttempts: Schema.number()
+      .default(3)
+      .description("Hard preflight sidecar attempts per generation before budget error."),
   })
-    .default({
-      enabled: false,
-      summarizerProvider: "",
-      summarizerModel: "",
-      budgetTokens: 180_000,
-      keepTurns: 1,
-    })
-    .description("Long-session context management. Set in paseo.json; off unless enabled.")
+  .default({
+    enabled: false,
+    preserveRecentMessages: 5,
+    preserveRecentTokens: 5_000,
+    outputReserve: 8_192,
+    safetyMargin: 8_192,
+    preflightMaxAttempts: 3,
+  })
+    .description("acp-kernel preserve zone + §8 budget. Compress ranges come from refs in status, not keepTurns.")
     // Volatile so Settings can edit it live: the session reads it through
     // cfgGet() every turn, and dsh-settings refuses to write non-volatile paths.
     .volatile(),
@@ -100,6 +105,9 @@ export const Config: Schema<Config> = Schema.object({
 
 export function apply(ctx: Context, config: Config): void {
   const getConfig = (): CursorUiConfig => config as CursorUiConfig;
+
+  const contextEnabled = () => readContextManagement(getConfig()).enabled;
+  registerAcpSystemPrompt(ctx, contextEnabled);
 
   setContextPreference(cfgString(config?.context, "min"));
   (ctx as any).on?.("loader/volatile-update", () => {
@@ -161,13 +169,7 @@ export function apply(ctx: Context, config: Config): void {
     ? undefined
     : (opts: { apiKey: string; modelId: string }) => void prewarmCursor(opts);
 
-  /**
-   * Long-session context management, off unless the user asked for it.
-   *
-   * The summariser runs through DSH itself, so it may name any registered
-   * provider — compaction need not burn Cursor quota. The rewrite goes through
-   * the public checkpoint store; no SDK patching is involved.
-   */
+  /** Model-initiated checkpoint rewrite (cursor_context_compress → M3/M2 handoff). */
   let platform: Promise<any> | undefined;
   const getPlatform = (): Promise<any> =>
     (platform ??= import("@cursor/sdk").then((sdk) => sdk.createAgentPlatform()));
@@ -177,44 +179,19 @@ export function apply(ctx: Context, config: Config): void {
       getPlatform().then((p) => p.checkpointStore.saveCheckpoint(agentId, checkpoint)),
   };
 
-  const summarizerModels = new Map<string, string>();
-  /** Re-read per call: the Settings page edits these without restarting DSH. */
   const management = () => readContextManagement(config);
-  const summarise = async (
-    history: string,
-    opts?: { signal?: AbortSignal; sessionModel?: string },
-  ): Promise<string> => {
-    const cfg = management();
-    const provider = (cfg.summarizerProvider || PROVIDER_ID).trim();
-    let model = cfg.summarizerModel.trim();
-    // No summariser of our own: borrow the session's model for Cursor, or ask
-    // the named provider for its first model.
-    if (!model && provider === PROVIDER_ID) model = opts?.sessionModel ?? "";
-    if (!model) {
-      model = summarizerModels.get(provider) ?? "";
-      if (!model) {
-        const listed: any[] = (await (ctx as any).llm.listModels(provider)) ?? [];
-        model = String(listed[0]?.id ?? "");
-        if (model) summarizerModels.set(provider, model);
-      }
-    }
-    if (!model) throw new Error(`no model available for summarizer provider "${provider}"`);
-    const chunks = (ctx as any).llm.stream({
-      provider,
-      model,
-      messages: renderSummaryMessages({ history }),
-      maxTokens: MAX_SUMMARY_TOKENS,
-      signal: opts?.signal,
-    });
-    return collectSummaryText(chunks);
+  const preserveConfig = () => {
+    const m = management();
+    return { preserveRecentMessages: m.preserveRecentMessages, preserveRecentTokens: m.preserveRecentTokens };
   };
-
-  // Always wired: `enabled` is read per turn, so the switch on the Settings
-  // page takes effect immediately instead of only after a restart.
   const compact: CompactDeps = {
     store: checkpointStore,
-    settings: management,
-    summarize: summarise,
+    readBudget: management,
+    resolveKeepTurns: (sessionKey, messages, tokenCount, windowTokens, compactedAt) =>
+      kernelTurnPlan(sessionKey, messages, tokenCount, windowTokens, { compactedAt, preserve: preserveConfig() }).keepTurns,
+    preserveConfig,
+    createAgent: createCursorAgent,
+    deleteAgent: deleteCursorAgent,
   };
 
   const adapter = new CursorAdapter({
@@ -224,6 +201,7 @@ export function apply(ctx: Context, config: Config): void {
     cwdFor,
     readImage,
     prewarm,
+    contextEnabled,
     compact,
   });
   (ctx as any).llm.registerConfigurableProviders([
@@ -254,9 +232,31 @@ export function apply(ctx: Context, config: Config): void {
     return out;
   };
 
+  ctx.effect(() => {
+    void migrateLegacyContextSettings(ctx, getConfig()).catch(() => {});
+    return () => {};
+  }, "cursor-to-dsh: context settings migration");
+
   registerHostApi(ctx, getConfig, resolveApiKey, readCopilotTokens);
   registerCopilotAuth(ctx);
   registerCursorCommands(ctx, getConfig);
+  registerContextCommands(ctx, { preserveConfig, contextEnabled });
+  registerContextTools(ctx, {
+    contextEnabled,
+    preserveConfig,
+    contextWindowForModel: (modelId) => contextWindow({ id: resolveModelId(modelId) }),
+    sessionSnapshot: (sessionId, session, modelId) => {
+      if (!session?.deriveMessages) return sessionSnapshot(sessionId, [], "", [], modelId);
+      const messages = Array.from(session.deriveMessages() ?? []);
+      const route = session.requestContext?.();
+      const sys = messages.find((m) => (m as { role?: string })?.role === "system") as { content?: unknown } | undefined;
+      const systemPrompt = typeof sys?.content === "string" ? sys.content : "";
+      return {
+        provider: route?.provider ?? "unknown",
+        ...sessionSnapshot(sessionId, messages, systemPrompt, [], modelId, preserveConfig()),
+      };
+    },
+  });
 
   void resolveApiKey()
     .then((key) => (key ? adapter.listModels(PROVIDER_ID) : undefined))

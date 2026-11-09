@@ -2,8 +2,13 @@ import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 import { CursorAdapter } from "../src/adapter.ts";
+import {
+  clearContextFillSnapshots,
+  getContextFillSnapshot,
+} from "../src/context/fill-cache.ts";
 import { FALLBACK_MODELS } from "../src/models.ts";
 import { closeAllCursorSessions, cursorSessionCount } from "../src/session.ts";
+import { CONTEXT_DEFAULTS } from "../src/ui-state.ts";
 import { cursorOverhead, resetCursorOverhead } from "../src/usage.ts";
 
 /** Scripted fake Cursor agent. Each send runs `script(ctx)` as the model. */
@@ -133,6 +138,44 @@ async function call(adapter: CursorAdapter, messages: any[], options: any = {}) 
 beforeEach(() => {
   closeAllCursorSessions();
   resetCursorOverhead();
+  clearContextFillSnapshots();
+});
+
+const noopCheckpointStore = {
+  loadLatest: async () => undefined,
+  saveCheckpoint: async () => undefined,
+};
+
+function compactDepsFor(cursor: { createAgent: any }) {
+  return {
+    store: noopCheckpointStore,
+    readBudget: () => CONTEXT_DEFAULTS,
+    preserveConfig: () => ({
+      preserveRecentMessages: CONTEXT_DEFAULTS.preserveRecentMessages,
+      preserveRecentTokens: CONTEXT_DEFAULTS.preserveRecentTokens,
+    }),
+    resolveKeepTurns: () => 1,
+    createAgent: cursor.createAgent,
+    deleteAgent: async () => {},
+  };
+}
+
+test("runTurn publishes context fill snapshot when compaction is enabled", async () => {
+  const cursor = fakeCursor(async function* () {
+    yield say("ok");
+  });
+  const sessionId = `fill-${Date.now()}`;
+  const adapter = adapterFor(cursor, { compact: compactDepsFor(cursor) });
+  const s = sys("SYS");
+  const u1 = user("hello");
+  const r1 = await call(adapter, [s, u1], { sessionId });
+  assert.deepEqual(r1.finish, { kind: "stop" });
+  const snap = getContextFillSnapshot(sessionId);
+  assert.ok(snap);
+  assert.equal(snap!.sessionId, sessionId);
+  assert.ok(snap!.percent >= 0 && snap!.percent <= 100);
+  assert.ok(snap!.limitTokens > 0);
+  assert.ok(snap!.retainedTokens >= 0);
 });
 
 test("one Cursor agent per session; later calls send only the new user text", async () => {
