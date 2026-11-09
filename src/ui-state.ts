@@ -18,6 +18,32 @@ export type CursorUiConfig = KeyConfig & {
   apiKeyProfiles?: ApiKeyProfile[] | { get?: () => ApiKeyProfile[] };
   activeKeyId?: string | { get?: () => string };
   usageDisplay?: string | { get?: () => string };
+  contextManagement?: Partial<ContextManagementConfig> | { get?: () => Partial<ContextManagementConfig> };
+};
+
+/**
+ * Long-session context management. Defined here rather than in `index.ts` so
+ * the settings layer never has to import the plugin entry.
+ */
+export interface ContextManagementConfig {
+  /** Master switch. Off = every session behaves exactly as it does today. */
+  enabled: boolean;
+  /** Provider route used to summarise the dropped prefix. Empty = follow the session. */
+  summarizerProvider: string;
+  /** Model for that provider. Empty = the provider's default. */
+  summarizerModel: string;
+  /** Soft token budget for the retained window. */
+  budgetTokens: number;
+  /** Turns kept verbatim regardless of budget. */
+  keepTurns: number;
+}
+
+export const CONTEXT_DEFAULTS: ContextManagementConfig = {
+  enabled: false,
+  summarizerProvider: "",
+  summarizerModel: "",
+  budgetTokens: 180_000,
+  keepTurns: 1,
 };
 
 export type ProfileStatus = {
@@ -34,6 +60,7 @@ type Overlay = {
   activeKeyId?: string;
   apiKeyProfiles?: ApiKeyProfile[];
   usageDisplay?: UsageMode;
+  contextManagement?: ContextManagementConfig;
 };
 
 const overlay: Overlay = {};
@@ -58,6 +85,7 @@ export function applyOverlay(next: Overlay): void {
   if (next.activeKeyId !== undefined) overlay.activeKeyId = next.activeKeyId;
   if (next.apiKeyProfiles !== undefined) overlay.apiKeyProfiles = next.apiKeyProfiles;
   if (next.usageDisplay !== undefined) overlay.usageDisplay = next.usageDisplay;
+  if (next.contextManagement !== undefined) overlay.contextManagement = next.contextManagement;
 }
 
 /** Test hook. */
@@ -65,6 +93,7 @@ export function resetOverlay(): void {
   delete overlay.activeKeyId;
   delete overlay.apiKeyProfiles;
   delete overlay.usageDisplay;
+  delete overlay.contextManagement;
 }
 
 const USAGE_MODES: UsageMode[] = ["auto", "always", "off"];
@@ -89,6 +118,47 @@ export async function setUsageDisplay(
 
 export function settingsNamespace(ctx: any): string {
   return ctx?.fiber?.entry?.options?.id ?? "llm-cursor";
+}
+
+/**
+ * The compaction settings as the session will see them: overlay first, then
+ * whatever the profile declares, then the defaults. Every field is normalised
+ * so a hand-edited YAML that dropped a key cannot produce a NaN budget.
+ */
+export function readContextManagement(config: unknown): ContextManagementConfig {
+  // `Config` in index.ts carries Volatile<> wrappers the schema types do not,
+  // and this only ever reads one plain field off it.
+  const raw = {
+    ...CONTEXT_DEFAULTS,
+    ...(overlay.contextManagement ?? cfgGet((config as any)?.contextManagement) ?? {}),
+  };
+  const budget = Math.floor(Number(raw.budgetTokens));
+  return {
+    enabled: Boolean(raw.enabled),
+    summarizerProvider: String(raw.summarizerProvider ?? "").trim(),
+    summarizerModel: String(raw.summarizerModel ?? "").trim(),
+    budgetTokens: Number.isFinite(budget) && budget > 0 ? budget : CONTEXT_DEFAULTS.budgetTokens,
+    keepTurns: Math.max(1, Math.floor(Number(raw.keepTurns)) || CONTEXT_DEFAULTS.keepTurns),
+  };
+}
+
+/** Persist a partial update; returns the merged settings afterwards. */
+export async function setContextManagement(
+  ctx: any,
+  config: CursorUiConfig | undefined,
+  patch: Partial<ContextManagementConfig>,
+): Promise<ContextManagementConfig> {
+  const merged = { ...readContextManagement(config), ...patch };
+  const budget = Math.floor(Number(merged.budgetTokens));
+  if (!Number.isFinite(budget) || budget <= 0) throw new Error("budgetTokens must be a positive number of tokens");
+  merged.budgetTokens = budget;
+  const keep = Math.floor(Number(merged.keepTurns));
+  if (!Number.isFinite(keep) || keep < 1) throw new Error("keepTurns must be at least 1");
+  merged.keepTurns = keep;
+  merged.summarizerProvider = String(merged.summarizerProvider ?? "").trim();
+  merged.summarizerModel = String(merged.summarizerModel ?? "").trim();
+  await persistConfig(ctx, { contextManagement: merged });
+  return readContextManagement(config);
 }
 
 async function persistConfig(ctx: any, patch: Record<string, unknown>): Promise<void> {
@@ -247,6 +317,7 @@ export function uiSnapshot(ctx: any, config: CursorUiConfig | undefined) {
     activeKeyId: readActiveKeyId(config),
     profiles: await listProfileStatus(ctx, config),
     usageDisplay: readUsageDisplay(config),
+    contextManagement: readContextManagement(config),
     settingsNs: settingsNamespace(ctx),
   }))();
 }

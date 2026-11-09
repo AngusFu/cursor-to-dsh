@@ -37,6 +37,7 @@ import { calibrateOverhead, cursorOverhead, runUsage } from "./usage.ts";
 import type { CheckpointStoreLike } from "./context/checkpoint.ts";
 import { runCompaction } from "./context/compact.ts";
 import { SUMMARY_PREFIX } from "./context/summarizer.ts";
+import type { ContextManagementConfig } from "./ui-state.ts";
 
 const SLOTS_PER_KEY = 3;
 const IDLE_CLOSE_MS = 20 * 60_000;
@@ -251,10 +252,12 @@ export function planIncrement(s: CursorSession | undefined, messages: any[]): Pl
  */
 export interface CompactDeps {
   store: CheckpointStoreLike;
-  /** Rolling token budget for what Cursor still holds verbatim. */
-  budgetTokens: number;
-  /** Turns kept verbatim regardless of budget. */
-  keepTurns: number;
+  /**
+   * Read per turn, not captured once: the Settings page edits these values
+   * without restarting DSH, and the switch itself lives here so turning
+   * compaction off does not need a new adapter.
+   */
+  settings: () => ContextManagementConfig;
   summarize: (history: string, opts?: { signal?: AbortSignal }) => Promise<string>;
 }
 
@@ -380,11 +383,14 @@ async function maybeCompact(opts: {
   const agentId = String(s.agent?.agentId ?? "");
   if (!deps || s.closed || !agentId) return "";
 
+  const cfg = deps.settings();
+  if (!cfg.enabled) return "";
+
   const retained =
     estimateTranscript(t.systemPrompt, t.tools, t.messages.slice(s.compactedAt)) +
     s.summaryTokens +
     cursorOverhead(modelId);
-  if (retained <= deps.budgetTokens) return "";
+  if (retained <= cfg.budgetTokens) return "";
 
   let outcome;
   try {
@@ -394,7 +400,7 @@ async function maybeCompact(opts: {
       cwd,
       messages: t.messages,
       compactedAt: s.compactedAt,
-      keepTurns: deps.keepTurns,
+      keepTurns: cfg.keepTurns,
       previousSummary: s.summary,
       summarize: (history) => deps.summarize(history, { signal }),
     });

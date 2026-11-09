@@ -18,7 +18,14 @@ import { type ApiKeyProfile, type KeyConfig, resolveActiveApiKey } from "./keys.
 import { PROVIDER_ID, setContextPreference } from "./models.ts";
 import { createCursorAgent, listCursorModels, prewarmCursor } from "./sdk.ts";
 import { closeAllCursorSessions, debug, type CompactDeps } from "./session.ts";
-import { readActiveKeyId, readProfiles, type CursorUiConfig } from "./ui-state.ts";
+import {
+  readActiveKeyId,
+  readContextManagement,
+  readProfiles,
+  type ContextManagementConfig,
+  type CursorUiConfig,
+} from "./ui-state.ts";
+export type { ContextManagementConfig } from "./ui-state.ts";
 import type { CheckpointStoreLike } from "./context/checkpoint.ts";
 import { MAX_SUMMARY_TOKENS, collectSummaryText, renderSummaryMessages } from "./context/summarizer.ts";
 
@@ -41,26 +48,6 @@ export interface Config {
    * rewrite are opt-in because both change what the model can see.
    */
   contextManagement?: ContextManagementConfig;
-}
-
-/**
- * `paseo.json` → plugin entry `cursor-to-dsh` → `contextManagement`.
- *
- * The summariser model is deliberately independent of the session's model: any
- * registered DSH provider may be named here, so compaction does not have to
- * burn Cursor quota or spawn a throwaway Cursor agent.
- */
-export interface ContextManagementConfig {
-  /** Master switch. Off = every session behaves exactly as it does today. */
-  enabled: boolean;
-  /** Provider route used to summarise the dropped prefix. Empty = follow the session. */
-  summarizerProvider: string;
-  /** Model for that provider. Empty = the provider's default. */
-  summarizerModel: string;
-  /** Soft token budget for the retained window. */
-  budgetTokens: number;
-  /** Turns kept verbatim regardless of budget. */
-  keepTurns: number;
 }
 
 const ApiKeyProfileSchema = Schema.object({
@@ -105,7 +92,10 @@ export const Config: Schema<Config> = Schema.object({
       budgetTokens: 180_000,
       keepTurns: 1,
     })
-    .description("Long-session context management. Set in paseo.json; off unless enabled."),
+    .description("Long-session context management. Set in paseo.json; off unless enabled.")
+    // Volatile so Settings can edit it live: the session reads it through
+    // cfgGet() every turn, and dsh-settings refuses to write non-volatile paths.
+    .volatile(),
 }) as any;
 
 export function apply(ctx: Context, config: Config): void {
@@ -188,13 +178,15 @@ export function apply(ctx: Context, config: Config): void {
   };
 
   const summarizerModels = new Map<string, string>();
-  const management = config?.contextManagement;
+  /** Re-read per call: the Settings page edits these without restarting DSH. */
+  const management = () => readContextManagement(config);
   const summarise = async (
     history: string,
     opts?: { signal?: AbortSignal; sessionModel?: string },
   ): Promise<string> => {
-    const provider = (management?.summarizerProvider || PROVIDER_ID).trim();
-    let model = (management?.summarizerModel ?? "").trim();
+    const cfg = management();
+    const provider = (cfg.summarizerProvider || PROVIDER_ID).trim();
+    let model = cfg.summarizerModel.trim();
     // No summariser of our own: borrow the session's model for Cursor, or ask
     // the named provider for its first model.
     if (!model && provider === PROVIDER_ID) model = opts?.sessionModel ?? "";
@@ -217,14 +209,13 @@ export function apply(ctx: Context, config: Config): void {
     return collectSummaryText(chunks);
   };
 
-  const compact: CompactDeps | undefined = management?.enabled
-    ? {
-        store: checkpointStore,
-        budgetTokens: management.budgetTokens,
-        keepTurns: management.keepTurns,
-        summarize: summarise,
-      }
-    : undefined;
+  // Always wired: `enabled` is read per turn, so the switch on the Settings
+  // page takes effect immediately instead of only after a restart.
+  const compact: CompactDeps = {
+    store: checkpointStore,
+    settings: management,
+    summarize: summarise,
+  };
 
   const adapter = new CursorAdapter({
     createAgent: createCursorAgent,

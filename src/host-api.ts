@@ -8,6 +8,7 @@ import {
   readUsageDisplay,
   removeProfile,
   setProfileKey,
+  setContextManagement,
   setUsageDisplay,
   uiSnapshot,
   useProfile,
@@ -145,6 +146,22 @@ export function registerHostApi(
             const body = await readJson(request);
             const mode = await setUsageDisplay(ctx, getConfig(), String(body.mode ?? ""));
             return { mode };
+          }),
+        }),
+        cctx.connection.fetch.register({
+          path: `${API_ROOT}/context`,
+          methods: ["POST"],
+          requestBody: "buffered",
+          fetch: fetchAction(async (request) => {
+            const body = await readJson(request);
+            const patch: Record<string, unknown> = {};
+            if (body.enabled !== undefined) patch.enabled = Boolean(body.enabled);
+            if (body.summarizerProvider !== undefined) patch.summarizerProvider = String(body.summarizerProvider);
+            if (body.summarizerModel !== undefined) patch.summarizerModel = String(body.summarizerModel);
+            if (body.budgetTokens !== undefined) patch.budgetTokens = Number(body.budgetTokens);
+            if (body.keepTurns !== undefined) patch.keepTurns = Number(body.keepTurns);
+            await setContextManagement(ctx, getConfig(), patch);
+            return uiSnapshot(ctx, getConfig());
           }),
         }),
       ];

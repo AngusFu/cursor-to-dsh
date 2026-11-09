@@ -84,6 +84,23 @@ window.__ModuleLoader__.load({
       copilotLogin: "Sign in",
       copilotLogout: "Sign out",
       copilotModelCount: "Models: {t}",
+      ctxTitle: "Long-session context",
+      ctxHint: "When a session grows past its token budget, the plugin rewrites the Cursor checkpoint in place so the model only sees the retained tail, and turns the dropped prefix into a summary. Off by default: nothing changes until you switch it on.",
+      ctxEnabled: "Compaction",
+      ctxOn: "On",
+      ctxOff: "Off",
+      ctxEnabledHint: "On: the next turn rewrites the Cursor checkpoint, falling back to a new agent generation if that fails. Off: sessions behave exactly as they do today.",
+      ctxModelHint: "Provider route and model used to summarise the dropped prefix. Any registered DSH provider may be named here. Leave both blank to summarise with the session's own model, which spends Cursor quota.",
+      ctxProvider: "Provider route",
+      ctxProviderPlaceholder: "e.g. anthropic",
+      ctxModel: "Model",
+      ctxModelPlaceholder: "e.g. claude-sonnet-4-5",
+      ctxBudget: "Token budget",
+      ctxBudgetHint: "Soft token budget for the window kept in the Cursor checkpoint. Once the retained turns exceed it, everything older is compacted away.",
+      ctxKeep: "Turns kept",
+      ctxKeepHint: "How many recent turns stay verbatim no matter how small the budget is.",
+      ctxApply: "Apply",
+      ctxApplied: "Applied. Effective from the next turn.",
     };
     const ZH = {
       nav: "Cursor",
@@ -151,6 +168,23 @@ window.__ModuleLoader__.load({
       copilotLogin: "登录",
       copilotLogout: "退出",
       copilotModelCount: "模型：{t}",
+      ctxTitle: "长会话上下文",
+      ctxHint: "会话超过 token 预算时，插件会就地改写 Cursor checkpoint，让模型只看到保留下来的近尾部，并把被丢掉的前缀压成摘要。默认关闭：不打开就和现在完全一样。",
+      ctxEnabled: "压缩",
+      ctxOn: "开",
+      ctxOff: "关",
+      ctxEnabledHint: "开：下一轮就地改写 Cursor checkpoint，失败则回退到新建一代 agent。关：所有会话行为与现在一致。",
+      ctxModelHint: "用来把被丢掉的前缀压成摘要的 provider 路由和模型。任何已注册的 DSH provider 都可以填；两个都留空则用会话自己的模型，会消耗 Cursor 额度。",
+      ctxProvider: "Provider 路由",
+      ctxProviderPlaceholder: "例如 anthropic",
+      ctxModel: "模型",
+      ctxModelPlaceholder: "例如 claude-sonnet-4-5",
+      ctxBudget: "Token 预算",
+      ctxBudgetHint: "Cursor checkpoint 里保留窗口的软 token 预算；保留轮次一旦超过它，更早的前缀就会被压掉。",
+      ctxKeep: "保留轮次",
+      ctxKeepHint: "无论预算多小，都原样保留的最近轮次数。",
+      ctxApply: "应用",
+      ctxApplied: "已应用，从下一轮生效。",
     };
 
     let localeRuntime;
@@ -673,6 +707,131 @@ window.__ModuleLoader__.load({
       });
     }
 
+    /**
+     * Compaction settings. Read from `/status`, written through `POST /context`,
+     * which returns the same snapshot shape so the parent can adopt it whole.
+     */
+    function ContextCard({ initial, onSaved }) {
+      const [cfg, setCfg] = useState(initial);
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState();
+      const [note, setNote] = useState();
+
+      useEffect(() => { if (initial) setCfg(initial); }, [initial]);
+
+      const set = (key, value) => setCfg((prev) => ({ ...(prev ?? {}), [key]: value }));
+
+      const apply = () => {
+        setBusy(true);
+        setError(void 0);
+        setNote(void 0);
+        return request("/context", "POST", {
+          enabled: Boolean(cfg?.enabled),
+          summarizerProvider: String(cfg?.summarizerProvider ?? "").trim(),
+          summarizerModel: String(cfg?.summarizerModel ?? "").trim(),
+          budgetTokens: Number(cfg?.budgetTokens),
+          keepTurns: Number(cfg?.keepTurns),
+        }).then(
+          (next) => {
+            if (next?.contextManagement) setCfg(next.contextManagement);
+            if (onSaved) onSaved(next);
+            setNote(text("ctxApplied"));
+          },
+          (cause) => { setError(cause instanceof Error ? cause.message : String(cause)); },
+        ).finally(() => setBusy(false));
+      };
+
+      const enabled = Boolean(cfg?.enabled);
+      const numberField = (key, labelKey) => jsxs("div", {
+        style: css.field,
+        children: [
+          jsx("span", { style: css.label, children: text(labelKey) }),
+          jsx(Input, {
+            type: "number",
+            min: 1,
+            value: cfg?.[key] ?? "",
+            disabled: busy,
+            onChange: (event) => set(key, event?.target?.value ?? ""),
+          }),
+        ],
+      });
+
+      return jsxs("div", {
+        style: css.card,
+        children: [
+          jsx("h3", { style: css.h3, children: text("ctxTitle") }),
+          jsx("p", { style: css.hint, children: text("ctxHint") }),
+          error ? jsx("p", { role: "alert", style: css.error, children: error }) : null,
+          note ? jsx("p", { style: css.hint, children: note }) : null,
+          jsxs("div", {
+            style: css.modeRow,
+            children: [
+              jsx("span", { style: css.label, children: text("ctxEnabled") }),
+              ...["on", "off"].map((item) =>
+                jsx(Button, {
+                  variant: (enabled ? "on" : "off") === item ? "primary" : "outline",
+                  disabled: busy,
+                  onClick: () => set("enabled", item === "on"),
+                  children: text(item === "on" ? "ctxOn" : "ctxOff"),
+                }, item),
+              ),
+            ],
+          }),
+          jsx("p", { style: css.hint, children: text("ctxEnabledHint") }),
+          jsx("div", { style: css.sectionDivider }),
+          jsx("p", { style: css.hint, children: text("ctxModelHint") }),
+          jsxs("div", {
+            style: css.row,
+            children: [
+              jsxs("div", {
+                style: css.field,
+                children: [
+                  jsx("span", { style: css.label, children: text("ctxProvider") }),
+                  jsx(Input, {
+                    value: cfg?.summarizerProvider ?? "",
+                    placeholder: text("ctxProviderPlaceholder"),
+                    disabled: busy,
+                    onChange: (event) => set("summarizerProvider", event?.target?.value ?? ""),
+                  }),
+                ],
+              }),
+              jsxs("div", {
+                style: css.field,
+                children: [
+                  jsx("span", { style: css.label, children: text("ctxModel") }),
+                  jsx(Input, {
+                    value: cfg?.summarizerModel ?? "",
+                    placeholder: text("ctxModelPlaceholder"),
+                    disabled: busy,
+                    onChange: (event) => set("summarizerModel", event?.target?.value ?? ""),
+                  }),
+                ],
+              }),
+            ],
+          }),
+          jsx("div", { style: css.sectionDivider }),
+          jsxs("div", {
+            style: css.row,
+            children: [numberField("budgetTokens", "ctxBudget"), numberField("keepTurns", "ctxKeep")],
+          }),
+          jsx("p", { style: css.hint, children: text("ctxBudgetHint") }),
+          jsx("p", { style: css.hint, children: text("ctxKeepHint") }),
+          jsxs("div", {
+            style: css.actions,
+            children: [
+              jsx(Button, {
+                variant: "primary",
+                disabled: busy,
+                "aria-busy": busy,
+                onClick: () => { void apply(); },
+                children: text(busy ? "busy" : "ctxApply"),
+              }),
+            ],
+          }),
+        ],
+      });
+    }
+
     function CursorSettings() {
       useLocaleRevision();
       const [status, setStatus] = useState();
@@ -760,6 +919,11 @@ window.__ModuleLoader__.load({
           }),
 
           jsx(CopilotAuthCard, {}),
+
+          jsx(ContextCard, {
+            initial: status?.contextManagement,
+            onSaved: (next) => { if (next) setStatus(next); },
+          }),
 
           jsxs("div", {
             style: css.card,
