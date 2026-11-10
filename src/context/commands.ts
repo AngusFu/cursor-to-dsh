@@ -1,6 +1,8 @@
 /**
  * Slash commands for Cursor context (acp panel).
  */
+import type { Context } from "@deepseek-ai/cordis";
+
 import { PROVIDER_ID } from "../models.ts";
 import { getContextFillSnapshot } from "./fill-cache.ts";
 import { renderLiveContextPanel } from "./panel.ts";
@@ -39,17 +41,16 @@ function livePanelText(session: any, preserve: AcpPreserveConfig): string | { ki
   });
 }
 
-const CONTEXT_DISABLED =
-  "Long-session context management is disabled (Settings → Cursor → enable long-session context).";
-
 export interface ContextCommandDeps {
   preserveConfig: () => AcpPreserveConfig;
-  contextEnabled?: () => boolean;
 }
 
-export function registerContextCommands(ctx: any, deps: ContextCommandDeps): void {
+/** Register context slash commands; returns a disposer that unregisters them. */
+export function registerContextCommands(ctx: Context, deps: ContextCommandDeps): (() => void) | undefined {
+  const commands: any = (ctx as any).commands;
+  if (!commands?.register) return undefined;
+
   const panelHandler = async (inv: any, alias: boolean) => {
-    if (deps.contextEnabled?.() === false) return { kind: "error", text: CONTEXT_DISABLED };
     const session = sessionOf(inv);
     const out = livePanelText(session, deps.preserveConfig());
     if (typeof out !== "string") {
@@ -60,24 +61,26 @@ export function registerContextCommands(ctx: any, deps: ContextCommandDeps): voi
     return { kind: "success", text: out };
   };
 
-  ctx.inject?.(["commands"], (cctx: any) => {
-    cctx.commands.register({
+  const dispose: Array<() => void> = [];
+  dispose.push(
+    commands.register({
       name: "cursor-acp-panel",
       description: "Show the acp-kernel context status panel (local; same layout as billion-context)",
       handler: (inv: any) => panelHandler(inv, false),
-    });
-
-    ctx.commands.register({
+    }),
+  );
+  dispose.push(
+    commands.register({
       name: "cursor-context-status",
       description: "Alias for /cursor-acp-panel",
       handler: (inv: any) => panelHandler(inv, true),
-    });
-
-    ctx.commands.register({
+    }),
+  );
+  dispose.push(
+    commands.register({
       name: "cursor-context-fill",
       description: "Show retained-token context fill % (updates after each Cursor turn)",
       handler: (inv: any) => {
-        if (deps.contextEnabled?.() === false) return { kind: "error", text: CONTEXT_DISABLED };
         const session = sessionOf(inv);
         const sessionId = session?.id;
         if (!sessionId) {
@@ -106,6 +109,10 @@ export function registerContextCommands(ctx: any, deps: ContextCommandDeps): voi
           text: `Context fill ${snap.percent}% — ${snap.retainedTokens.toLocaleString()} / ${snap.limitTokens.toLocaleString()} tokens (${snap.modelId})${pending}`,
         };
       },
-    });
-  });
+    }),
+  );
+
+  return () => {
+    for (const fn of dispose) fn();
+  };
 }

@@ -35,7 +35,7 @@ import {
 export type { ContextManagementConfig } from "./ui-state.ts";
 import type { CheckpointStoreLike } from "./context/checkpoint.ts";
 export const name = "cursor-to-dsh";
-export const inject = ["llm", "tools", "systemPrompt"];
+export const inject = ["llm", "tools", "systemPrompt", "commands"];
 
 export interface Config {
   /** Volatile so the settings service gives this plugin a namespace and the Models page lists Cursor. */
@@ -240,23 +240,46 @@ export function apply(ctx: Context, config: Config): void {
   registerHostApi(ctx, getConfig, resolveApiKey, readCopilotTokens);
   registerCopilotAuth(ctx);
   registerCursorCommands(ctx, getConfig);
-  registerContextCommands(ctx, { preserveConfig, contextEnabled });
-  registerContextTools(ctx, {
+  const contextToolDeps = {
     contextEnabled,
     preserveConfig,
-    contextWindowForModel: (modelId) => contextWindow({ id: resolveModelId(modelId) }),
-    sessionSnapshot: (sessionId, session, modelId) => {
+    contextWindowForModel: (modelId: string) => contextWindow({ id: resolveModelId(modelId) }),
+    sessionSnapshot: (sessionId: string, session: any, modelId: string) => {
       if (!session?.deriveMessages) return sessionSnapshot(sessionId, [], "", [], modelId);
       const messages = Array.from(session.deriveMessages() ?? []);
       const route = session.requestContext?.();
-      const sys = messages.find((m) => (m as { role?: string })?.role === "system") as { content?: unknown } | undefined;
+      const sys = messages.find((m: { role?: string }) => (m as { role?: string })?.role === "system") as
+        | { content?: unknown }
+        | undefined;
       const systemPrompt = typeof sys?.content === "string" ? sys.content : "";
       return {
         provider: route?.provider ?? "unknown",
         ...sessionSnapshot(sessionId, messages, systemPrompt, [], modelId, preserveConfig()),
       };
     },
-  });
+  };
+
+  ctx.effect(() => {
+    let disposeTools: (() => void) | undefined;
+    let disposeCommands: (() => void) | undefined;
+    const syncContextSurface = () => {
+      disposeTools?.();
+      disposeCommands?.();
+      disposeTools = undefined;
+      disposeCommands = undefined;
+      if (!contextEnabled()) return;
+      disposeTools = registerContextTools(ctx, contextToolDeps);
+      disposeCommands = registerContextCommands(ctx, { preserveConfig });
+    };
+    syncContextSurface();
+    const onVolatile = () => syncContextSurface();
+    (ctx as any).on?.("loader/volatile-update", onVolatile);
+    return () => {
+      (ctx as any).off?.("loader/volatile-update", onVolatile);
+      disposeTools?.();
+      disposeCommands?.();
+    };
+  }, "cursor-to-dsh: context surface");
 
   void resolveApiKey()
     .then((key) => (key ? adapter.listModels(PROVIDER_ID) : undefined))

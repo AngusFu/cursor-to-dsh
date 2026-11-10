@@ -85,11 +85,14 @@ function compressNoop(
   };
 }
 
-export function registerContextTools(ctx: Context, deps: ContextToolsDeps): void {
+/** Register context MCP tools; returns a disposer that unregisters them. */
+export function registerContextTools(ctx: Context, deps: ContextToolsDeps): (() => void) | undefined {
   const tools: any = (ctx as any).tools;
-  if (!tools?.register) return;
+  if (!tools?.register) return undefined;
+  const dispose: Array<() => void> = [];
 
-  tools.register(
+  dispose.push(
+    tools.register(
     defineTool({
       name: COMPRESS_TOOL_NAME,
       description: tdesc(
@@ -230,9 +233,11 @@ export function registerContextTools(ctx: Context, deps: ContextToolsDeps): void
         };
       },
     }),
+    ),
   );
 
-  tools.register(
+  dispose.push(
+    tools.register(
     defineTool({
       name: STATUS_TOOL_NAME,
       description: tdesc(
@@ -285,9 +290,11 @@ export function registerContextTools(ctx: Context, deps: ContextToolsDeps): void
         };
       },
     }),
+    ),
   );
 
-  tools.register(
+  dispose.push(
+    tools.register(
     defineTool({
       name: DECOMPRESS_TOOL_NAME,
       description: tdesc(
@@ -327,9 +334,11 @@ export function registerContextTools(ctx: Context, deps: ContextToolsDeps): void
         return page;
       },
     }),
+    ),
   );
 
-  tools.register(
+  dispose.push(
+    tools.register(
     defineTool({
       name: SEARCH_TOOL_NAME,
       description: tdesc(
@@ -357,5 +366,10 @@ export function registerContextTools(ctx: Context, deps: ContextToolsDeps): void
         return { hits: searchArchive(sessionId, query, limit) };
       },
     }),
+    ),
   );
+
+  return () => {
+    for (const fn of dispose) fn();
+  };
 }
