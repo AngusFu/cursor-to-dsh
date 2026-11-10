@@ -35,7 +35,6 @@ import { ERROR_CODES, Reply } from "./reply.ts";
 import type { Transcript } from "./transcript.ts";
 import { calibrateOverhead, cursorOverhead, runUsage } from "./usage.ts";
 import type { CheckpointStoreLike } from "./context/checkpoint.ts";
-import { acpSystemPromptAddition } from "./context/acp-prompts.ts";
 import { acpWireViewForSend } from "./context/kernel.ts";
 import { incrementFromAcpView, renderTranscriptWithAcpView, type AcpWireView } from "./context/acp-wire.ts";
 import { assessContextPressure } from "./context/budget.ts";
@@ -1000,7 +999,7 @@ export async function runTurn(opts: {
   const modelId = resolveModelId(model.id);
   const contextWindowTokens = opts.contextWindowTokens ?? 200_000;
   const budgetActive = Boolean(deps.compact) && !sessionKey.startsWith(ANON_PREFIX);
-  const effectiveSystem = budgetActive && deps.compact ? acpSystemPromptAddition(t.systemPrompt) : t.systemPrompt;
+  const effectiveSystem = t.systemPrompt;
   if (!apiKey) {
     return reply.finish("error", "No Cursor API key. Store CURSOR_API_KEY in DSH credentials or export it before launching DSH.", ERROR_CODES.missingKey);
   }

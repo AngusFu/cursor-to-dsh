@@ -15,7 +15,7 @@ import { registerContextCommands } from "./context/commands.ts";
 import { registerCursorCommands } from "./commands.ts";
 import { cfgString } from "./config-value.ts";
 import { registerHostApi } from "./host-api.ts";
-import { registerAcpSystemPrompt } from "./context/system-prompt.ts";
+import { registerAcpContextPrompt } from "./context/system-prompt.ts";
 import { registerContextTools } from "./context/tools.ts";
 import { type ApiKeyProfile, type KeyConfig, resolveActiveApiKey } from "./keys.ts";
 import { PROVIDER_ID, setContextPreference } from "./models.ts";
@@ -107,7 +107,6 @@ export function apply(ctx: Context, config: Config): void {
   const getConfig = (): CursorUiConfig => config as CursorUiConfig;
 
   const contextEnabled = () => readContextManagement(getConfig()).enabled;
-  registerAcpSystemPrompt(ctx, contextEnabled);
 
   setContextPreference(cfgString(config?.context, "min"));
   (ctx as any).on?.("loader/volatile-update", () => {
@@ -262,12 +261,16 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => {
     let disposeTools: (() => void) | undefined;
     let disposeCommands: (() => void) | undefined;
+    let disposeAcpPrompt: (() => void) | undefined;
     const syncContextSurface = () => {
       disposeTools?.();
       disposeCommands?.();
+      disposeAcpPrompt?.();
       disposeTools = undefined;
       disposeCommands = undefined;
+      disposeAcpPrompt = undefined;
       if (!contextEnabled()) return;
+      disposeAcpPrompt = registerAcpContextPrompt(ctx);
       disposeTools = registerContextTools(ctx, contextToolDeps);
       disposeCommands = registerContextCommands(ctx, { preserveConfig });
     };
@@ -278,6 +281,7 @@ export function apply(ctx: Context, config: Config): void {
       (ctx as any).off?.("loader/volatile-update", onVolatile);
       disposeTools?.();
       disposeCommands?.();
+      disposeAcpPrompt?.();
     };
   }, "cursor-to-dsh: context surface");
 

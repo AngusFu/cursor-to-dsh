@@ -8,7 +8,7 @@ import {
   refHex,
 } from "../src/context/checkpoint.ts";
 import { ACP_SYSTEM_MARKER, acpContextSectionText, acpSystemPromptAddition } from "../src/context/acp-prompts.ts";
-import { registerAcpSystemPrompt } from "../src/context/system-prompt.ts";
+import { registerAcpContextPrompt } from "../src/context/system-prompt.ts";
 import { planCompaction, runCompaction } from "../src/context/compact.ts";
 import {
   SUMMARY_PREFIX,
@@ -203,26 +203,21 @@ test("collectSummaryText takes only the text the user would read", async () => {
   assert.equal(await collectSummaryText((async function* () { yield { type: "reasoning-delta", text: "x" }; })()), "");
 });
 
-test("registerAcpSystemPrompt registers cursor:acp-context only on cursor route", () => {
-  const sections: any[] = [];
+test("registerAcpContextPrompt registers runtime context only on cursor route", () => {
+  const contexts: any[] = [];
   const ctx = {
-    effect: (fn: () => () => void) => fn(),
     systemPrompt: {
-      getSectionOrder: () => 3100,
-      section: (section: any) => {
-        sections.push(section);
+      context: (entry: any) => {
+        contexts.push(entry);
         return () => {};
       },
     },
   };
-  registerAcpSystemPrompt(ctx as any, () => true);
-  assert.equal(sections.length, 1);
-  assert.equal(sections[0]!.name, "cursor:acp-context");
-  assert.equal(sections[0]!.text({ modelSelection: { provider: "deepseek" } }), "");
-  assert.match(sections[0]!.text({ modelSelection: { provider: "cursor" } }), /\[acp-context\]/);
-  sections.length = 0;
-  registerAcpSystemPrompt(ctx as any, () => false);
-  assert.equal(sections[0]!.text({ modelSelection: { provider: "cursor" } }), "");
+  registerAcpContextPrompt(ctx as any);
+  assert.equal(contexts.length, 1);
+  assert.equal(contexts[0]!.name, "cursor:acp-context");
+  assert.equal(contexts[0]!.text({ modelSelection: { provider: "deepseek" } }), "");
+  assert.match(contexts[0]!.text({ modelSelection: { provider: "cursor" } }), /\[acp-context\]/);
 });
 
 test("acpContextSectionText includes marker and compress tools", () => {

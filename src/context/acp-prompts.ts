@@ -21,7 +21,7 @@ export function acpContextSectionText(): string {
   return [ACP_SYSTEM_MARKER, block].filter(Boolean).join("\n\n");
 }
 
-/** Append the standing block to a base system prompt for the Cursor wire. Idempotent. */
+/** Legacy: append standing block onto a system prompt string (tests / non-DSH wire). Prefer `registerAcpContextPrompt`. */
 export function acpSystemPromptAddition(base: string): string {
   const trimmed = base.trim();
   const section = acpContextSectionText();

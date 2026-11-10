@@ -1,5 +1,5 @@
 /**
- * Register acp standing prompt via DSH system-prompt assembly (visible in session trajectory).
+ * Register acp standing prompt as DSH runtime context (separate trajectory record, not system prompt).
  */
 import type { Context } from "@deepseek-ai/cordis";
 
@@ -11,34 +11,34 @@ interface AssembleRouteContext {
   agent?: { options?: { provider?: string } };
 }
 
-export function registerAcpSystemPrompt(ctx: Context, contextEnabled?: () => boolean): void {
+/** Between approval policy (115) and harness source (200) in the runtime-context stack. */
+const ACP_CONTEXT_ORDER = 130;
+
+/**
+ * Contribute compress/ACP guidance via `systemPrompt.context()` so DSH logs it as its
+ * own context snapshot, not as part of the assembled system prompt.
+ */
+export function registerAcpContextPrompt(ctx: Context): (() => void) | undefined {
   const sp = (ctx as any).systemPrompt as
     | {
-        section: (section: {
+        context: (context: {
           name: string;
           order: number;
           interpolate?: boolean;
           text: string | ((context: AssembleRouteContext) => string);
         }) => () => void;
-        getSectionOrder: (name: string) => number;
       }
     | undefined;
-  if (!sp?.section) return;
+  if (!sp?.context) return undefined;
 
-  const order = typeof sp.getSectionOrder === "function" ? sp.getSectionOrder("MCP_SERVERS") + 50 : 3150;
-  ctx.effect(
-    () =>
-      sp.section({
-        name: "cursor:acp-context",
-        order,
-        interpolate: false,
-        text: (assembleContext) => {
-          if (contextEnabled?.() === false) return "";
-          const provider = assembleContext?.modelSelection?.provider ?? assembleContext?.agent?.options?.provider;
-          if (provider && provider !== PROVIDER_ID) return "";
-          return acpContextSectionText();
-        },
-      }),
-    "cursor-to-dsh: acp context system prompt",
-  );
+  return sp.context({
+    name: "cursor:acp-context",
+    order: ACP_CONTEXT_ORDER,
+    interpolate: false,
+    text: (assembleContext) => {
+      const provider = assembleContext?.modelSelection?.provider ?? assembleContext?.agent?.options?.provider;
+      if (provider && provider !== PROVIDER_ID) return "";
+      return acpContextSectionText();
+    },
+  });
 }
