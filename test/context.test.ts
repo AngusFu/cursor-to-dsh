@@ -9,6 +9,7 @@ import {
 } from "../src/context/checkpoint.ts";
 import { ACP_SYSTEM_MARKER, acpContextSectionText, acpSystemPromptAddition } from "../src/context/acp-prompts.ts";
 import { registerAcpContextPrompt } from "../src/context/system-prompt.ts";
+import { cursorContextToolsWhen } from "../src/context/cursor-route.ts";
 import { planCompaction, runCompaction } from "../src/context/compact.ts";
 import {
   SUMMARY_PREFIX,
@@ -201,6 +202,12 @@ test("collectSummaryText takes only the text the user would read", async () => {
   }
   assert.equal(await collectSummaryText(empty()), "");
   assert.equal(await collectSummaryText((async function* () { yield { type: "reasoning-delta", text: "x" }; })()), "");
+});
+
+test("cursorContextToolsWhen admits context tools only on the cursor route", () => {
+  assert.equal(cursorContextToolsWhen({ modelSelection: { provider: "cursor" } }), true);
+  assert.equal(cursorContextToolsWhen({ modelSelection: { provider: "deepseek" } }), false);
+  assert.equal(cursorContextToolsWhen({}), false);
 });
 
 test("registerAcpContextPrompt registers runtime context only on cursor route", () => {

@@ -19,6 +19,7 @@ import { cursorContextParamDescription, cursorContextToolDescription } from "./a
 import { planCompaction } from "./compact.ts";
 import { kernelTurnPlan } from "./kernel.ts";
 import { resolveCompressionLayer } from "./layers.ts";
+import { cursorContextToolsWhen } from "./cursor-route.ts";
 import { COMPRESS_TOOL_NAME, DECOMPRESS_TOOL_NAME, SEARCH_TOOL_NAME, STATUS_TOOL_NAME } from "./names.ts";
 import { peekModelCompress, scheduleModelCompress } from "./pending.ts";
 import { debug } from "../session.ts";
@@ -29,6 +30,8 @@ const CURSOR_ONLY =
   "This tool is only available while the session route is Cursor (`cursor`). Switch provider or start a Cursor session.";
 const CONTEXT_DISABLED =
   "Long-session context management is disabled (Settings → Cursor → enable long-session context).";
+
+const CURSOR_ROUTE_TOOLS = { when: cursorContextToolsWhen };
 
 function sessionIdOf(exec: { agent?: { session?: { id?: string; requestContext?: () => { provider?: string } | undefined } } }): string | undefined {
   const session = exec.agent?.session;
@@ -233,6 +236,7 @@ export function registerContextTools(ctx: Context, deps: ContextToolsDeps): (() 
         };
       },
     }),
+    CURSOR_ROUTE_TOOLS,
     ),
   );
 
@@ -290,6 +294,7 @@ export function registerContextTools(ctx: Context, deps: ContextToolsDeps): (() 
         };
       },
     }),
+    CURSOR_ROUTE_TOOLS,
     ),
   );
 
@@ -334,6 +339,7 @@ export function registerContextTools(ctx: Context, deps: ContextToolsDeps): (() 
         return page;
       },
     }),
+    CURSOR_ROUTE_TOOLS,
     ),
   );
 
@@ -366,6 +372,7 @@ export function registerContextTools(ctx: Context, deps: ContextToolsDeps): (() 
         return { hits: searchArchive(sessionId, query, limit) };
       },
     }),
+    CURSOR_ROUTE_TOOLS,
     ),
   );
 
