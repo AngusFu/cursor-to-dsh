@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createInitialState } from "acp-kernel";
 
 import { renderContextPanel, renderPersistedContextPanel } from "../src/context/panel.ts";
-import { ledgerPersistenceEnabled, persistKernelState } from "../src/context/ledger-persist.ts";
+import { ledgerPersistenceWritable, persistKernelState } from "../src/context/ledger-persist.ts";
 import { clearKernelSessions, flushKernelState, kernelTurnPlan } from "../src/context/kernel.ts";
 
 test("renderContextPanel emits cursor-to-dsh version header", () => {
@@ -19,7 +19,7 @@ test("renderContextPanel emits cursor-to-dsh version header", () => {
 });
 
 test("persisted panel uses last_token_count from SQLite", () => {
-  if (!ledgerPersistenceEnabled()) return;
+  if (!ledgerPersistenceWritable()) return;
   clearKernelSessions();
   const sessionId = `panel-tok-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const messages = [
@@ -34,7 +34,7 @@ test("persisted panel uses last_token_count from SQLite", () => {
 });
 
 test("persistKernelState stores lastTokenCount explicitly", () => {
-  if (!ledgerPersistenceEnabled()) return;
+  if (!ledgerPersistenceWritable()) return;
   clearKernelSessions();
   const sessionId = `panel-explicit-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   persistKernelState(sessionId, {

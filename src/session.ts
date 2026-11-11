@@ -481,7 +481,7 @@ async function rebuildAgentM2(opts: {
   deps: CompactDeps;
 }): Promise<boolean> {
   const { s, t, agentId, modelId, params, apiKey, cwd, deps } = opts;
-  void s.agent?.getUsage?.().catch(() => {
+  void Promise.resolve(s.agent?.getUsage?.()).catch(() => {
     /* usage snapshot best-effort before delete */
   });
   try {

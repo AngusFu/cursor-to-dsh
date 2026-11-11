@@ -244,6 +244,26 @@ export function ledgerPersistenceEnabled(): boolean {
   return openLedgerDb() !== undefined;
 }
 
+/** True when SQLite accepts writes (DSH may hold the ledger db read-only while running). */
+export function ledgerPersistenceWritable(): boolean {
+  const store = openLedgerDb();
+  if (!store) return false;
+  const probe = "__cursor_ledger_write_probe__";
+  try {
+    store
+      .prepare(
+        `INSERT INTO kernel_state (session_id, state_json, applied_revision, last_token_count, updated_at)
+         VALUES (?, '{}', 0, 0, ?)
+         ON CONFLICT(session_id) DO UPDATE SET updated_at = excluded.updated_at`,
+      )
+      .run(probe, Date.now());
+    store.prepare(`DELETE FROM kernel_state WHERE session_id = ?`).run(probe);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function listPersistedContextSessions(limit = 40): {
   sessionId: string;
   appliedRevision: number;
