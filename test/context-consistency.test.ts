@@ -1,12 +1,13 @@
-import { test, afterEach } from "node:test";
+import { test, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { compactCheckpoint } from "../src/context/checkpoint.ts";
+import { resetLedgerDb } from "../src/context/ledger-persist.ts";
 import { readRequest } from "../src/transcript.ts";
 import { renderTranscriptWithAcpView } from "../src/context/acp-wire.ts";
 import { toCoreMessages, kernelTurnPlan, kernelApplyCompression, kernelAppliedRevision, kernelStatus, kernelResidentTokens } from "../src/context/kernel.ts";
@@ -23,6 +24,22 @@ const summary = "Selected older work is summarized here; unselected history and 
 const long = (i: number) => `UNIQUE_ORIGINAL_${i}: ` + `${i} source-record `.repeat(500);
 const history = () => Array.from({ length: 8 }, (_, i) => user(long(i)));
 const compress = { name: "cursor_context_compress", description: "compress", parameters: { type: "object", properties: {} } };
+
+// Parallel test files share one process HOME ledger; isolate this file so the
+// cold-reload child can see the parent process's persisted coverage.
+const previousHome = process.env.HOME;
+const isolatedHome = mkdtempSync(join(tmpdir(), "cursor-context-consistency-"));
+before(() => {
+  process.env.HOME = isolatedHome;
+  resetLedgerDb();
+});
+after(() => {
+  resetLedgerDb();
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
+  rmSync(isolatedHome, { recursive: true, force: true });
+});
+
 
 function compactDeps(cursor: any, onDelete = () => {}) {
   return {
