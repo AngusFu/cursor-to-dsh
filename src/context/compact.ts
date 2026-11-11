@@ -12,7 +12,7 @@
  * still holds one of them.
  */
 import { incrementText } from "../prompt.ts";
-import { compactCheckpoint, needlesFrom, type CheckpointStoreLike } from "./checkpoint.ts";
+import { compactCheckpoint, type CheckpointStoreLike } from "./checkpoint.ts";
 
 export interface CompactionPlan {
   /** Messages between the last compaction and the ones kept verbatim. */
@@ -119,6 +119,7 @@ export interface HostCompactionRun {
   readonly summary: string;
   readonly keepFrom: number;
   readonly needles: readonly string[];
+  readonly keepNeedles?: readonly string[];
 }
 
 /**
@@ -136,6 +137,7 @@ export async function runHostCompaction(input: HostCompactionRun): Promise<Compa
     summary,
     keepFrom: input.keepFrom,
     needles: input.needles,
+    keepNeedles: input.keepNeedles,
   });
 }
 
@@ -147,6 +149,7 @@ async function applyCompactionRewrite(opts: {
   summary: string;
   keepFrom: number;
   needles: readonly string[];
+  keepNeedles?: readonly string[];
 }): Promise<CompactionOutcome | undefined> {
   const result = await compactCheckpoint({
     store: opts.store,
@@ -154,6 +157,7 @@ async function applyCompactionRewrite(opts: {
     cwd: opts.cwd,
     keepTurns: Math.max(1, Math.floor(opts.keepTurns) || 1),
     needles: opts.needles,
+    keepNeedles: opts.keepNeedles,
   });
   if (!result.ok) return undefined;
   return { summary: opts.summary, keepFrom: opts.keepFrom };

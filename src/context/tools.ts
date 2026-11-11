@@ -17,6 +17,7 @@ import {
 } from "./ledger.ts";
 import { cursorContextParamDescription, cursorContextToolDescription } from "./acp-tool-surface.ts";
 import { planCompaction } from "./compact.ts";
+import { contextMessages } from "./message-shape.ts";
 import { kernelTurnPlan } from "./kernel.ts";
 import { resolveCompressionLayer } from "./layers.ts";
 import { cursorContextToolsWhen } from "./cursor-route.ts";
@@ -49,7 +50,7 @@ function assertCursorSession(exec: { agent?: { session?: { id?: string; requestC
 
 function messagesOf(exec: { agent?: { session?: { deriveMessages?: () => readonly unknown[] } } }): any[] {
   const derived = exec.agent?.session?.deriveMessages?.();
-  return derived ? Array.from(derived) : [];
+  return derived ? contextMessages(Array.from(derived)) : [];
 }
 
 export interface ContextToolsDeps {

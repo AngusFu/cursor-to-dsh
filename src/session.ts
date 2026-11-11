@@ -40,7 +40,8 @@ import { incrementFromAcpView, renderTranscriptWithAcpView, type AcpWireView } f
 import { assessContextPressure } from "./context/budget.ts";
 import { contextWindow } from "./models.ts";
 import {
-  kernelApplyCompression,
+  prepareKernelCompression,
+  kernelResidentTokens,
   kernelNudgeForTurn,
   kernelStatus,
   kernelTurnPlan,
@@ -59,6 +60,7 @@ import {
   syncMessageRefs,
 } from "./context/ledger.ts";
 import { setContextFillSnapshot } from "./context/fill-cache.ts";
+import { coreMessageOwner, contextMessageKey } from "./context/message-shape.ts";
 import { COMPRESS_TOOL_NAME } from "./context/names.ts";
 import {
   peekModelCompress,
@@ -100,6 +102,8 @@ class CursorSession {
   /** False for a run that re-delivers tool results: Cursor saw part of that turn twice. */
   runCalibrates = true;
   sentFirst = false;
+  /** Full effective kernel view to replay after a destructive M2 rebuild. */
+  replayView?: AcpWireView;
   pending: PendingCall[] = [];
   lastCallAt = 0;
   toolsKey = "";
@@ -542,80 +546,72 @@ async function commitModelCompress(opts: {
     return undefined;
   }
 
+  const preserve = deps.preserveConfig();
+  const windowTokens = opts.contextWindowTokens ?? 200_000;
+  const refs = syncMessageRefs(sessionKey, t.messages, { contextWindow: windowTokens, preserve });
+  const selected = refs.filter((r) => plan.drop.includes(t.messages[r.index]));
+  if (!selected.length) return undefined;
+  let staged;
+  try {
+    staged = prepareKernelCompression(sessionKey, t.messages, {
+      startRef: pending.startRef ?? selected[0]!.ref,
+      endRef: pending.endRef ?? selected[selected.length - 1]!.ref,
+      summary: pending.summary, topic: pending.topic, revision: pending.revision,
+    }, windowTokens, preserve);
+  } catch (err) {
+    debug(`model-compress rejected key=${s.key.slice(0, 12)}: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
+  const dropped = refs.filter((r) => staged.newIds.has(r.fingerprint));
+  const visibleOwners = new Set(staged.view.messages.map((m) => coreMessageOwner(m.id)));
+  const kept = t.messages.filter((m) => visibleOwners.has(contextMessageKey(m)));
   let outcome;
   let usedM2 = false;
   try {
-    outcome = await runHostCompaction({
-      store: deps.store,
-      agentId,
-      cwd,
-      keepTurns,
-      summary: pending.summary,
-      keepFrom: plan.keepFrom,
-      needles: [...plan.drop.map(incrementText), s.summary].filter(Boolean),
+    outcome = imagesOf(kept)?.length ? undefined : await runHostCompaction({
+      store: deps.store, agentId, cwd, keepTurns,
+      summary: pending.summary, keepFrom: plan.keepFrom,
+      needles: [...dropped.map((r) => r.text), s.summary].filter(Boolean),
+      keepNeedles: [t.systemPrompt, ...kept.map(incrementText), ...staged.view.messages.filter((m) => m.contentType === "tool-call").map((m) => m.text ?? "")].filter(Boolean),
     });
   } catch (err) {
     debug(`model-compress M3 error key=${s.key.slice(0, 12)}: ${err instanceof Error ? err.message : String(err)}`);
-    outcome = undefined;
   }
+  // Retained images cannot be safely associated with prompt blobs by text needles.
   if (!outcome) {
     usedM2 = await rebuildAgentM2({ s, t, agentId, modelId, params, apiKey, cwd, deps });
     if (!usedM2) {
       rescheduleModelCompress(sessionKey, pending);
       return undefined;
     }
-    outcome = { summary: pending.summary, keepFrom: plan.keepFrom };
   } else {
     s.generation++;
   }
-
-  const compactedBefore = s.compactedAt;
-  const dropRefs = syncMessageRefs(sessionKey, t.messages, {
-    tokenCount: estimateTranscript(t.systemPrompt, t.tools, t.messages),
-    contextWindow: opts.contextWindowTokens ?? 200_000,
-    compactedAt: compactedBefore,
-    preserve: deps.preserveConfig(),
-  })
-    .filter((r) => r.index >= compactedBefore && r.index < plan.keepFrom)
-    .map((r) => r.ref);
-  const dropText = plan.drop.map(incrementText).filter(Boolean).join("\n\n");
-  archiveCompression({
-    sessionId: sessionKey,
-    revision: pending.revision,
-    summary: pending.summary,
-    dropRefs,
-    dropText,
-    topic: pending.topic,
-  });
-
-  if (pending.startRef && pending.endRef) {
-    try {
-      kernelApplyCompression(
-        sessionKey,
-        t.messages,
-        {
-          startRef: pending.startRef,
-          endRef: pending.endRef,
-          summary: pending.summary,
-          topic: pending.topic,
-          revision: pending.revision,
-        },
-        opts.contextWindowTokens ?? 200_000,
-        deps.preserveConfig(),
-      );
-    } catch (err) {
-      debug(`kernel applyCompression key=${s.key.slice(0, 12)}: ${err instanceof Error ? err.message : String(err)}`);
-    }
+  try {
+    staged.commit();
+  } catch (err) {
+    // A concurrent accepted compression won. Do not publish this archive/view;
+    // the next host call must rebuild from the current kernel truth.
+    dropSession(s);
+    throw err;
   }
-
-  s.compactedAt = outcome.keepFrom;
-  s.summary = outcome.summary;
-  s.summaryTokens = estimateTextTokens(outcome.summary);
+  if (usedM2) s.replayView = staged.view;
+  archiveCompression({
+    sessionId: sessionKey, revision: pending.revision,
+    summary: pending.summary, dropRefs: dropped.map((r) => r.ref),
+    dropText: dropped.map((r) => r.text).join("\n\n"), topic: pending.topic,
+  });
+  const applied = kernelTurnPlan(sessionKey, t.messages, staged.view.messages.reduce((n, m) => n + estimateTextTokens(m.text ?? ""), 0), windowTokens, { preserve });
+  s.compactedAt = applied.compactedPrefix;
+  // All active summaries, not a claim that every earlier raw message is covered.
+  s.summary = staged.view.messages.filter((m) => m.text?.startsWith("[Compressed conversation section]"))
+    .map((m) => m.text).join("\n\n") || pending.summary;
+  s.summaryTokens = estimateTextTokens(s.summary);
   s.appliedViewRevision = pending.revision;
   s.preflightAttempts = 0;
   s.seen = t.messages.map(fingerprint);
   debug(
-    `model-compressed key=${s.key.slice(0, 12)} keepFrom=${outcome.keepFrom} summaryTokens=${s.summaryTokens} rev=${pending.revision} path=${usedM2 ? "M2" : "M3"}`,
+    `model-compressed key=${s.key.slice(0, 12)} keepFrom=${s.compactedAt} summaryTokens=${s.summaryTokens} rev=${pending.revision} path=${usedM2 ? "M2" : "M3"}`,
   );
   if (deps && !sessionKey.startsWith(ANON_PREFIX)) {
     void autoTierDistillIfReady({
@@ -631,7 +627,7 @@ async function commitModelCompress(opts: {
       deps: { createAgent: deps.createAgent, deleteAgent: deps.deleteAgent },
     }).catch(() => {});
   }
-  return `${SUMMARY_PREFIX}\n${outcome.summary}`;
+  return `${SUMMARY_PREFIX}\n${s.summary}`;
 }
 
 /** Fallback when handoff did not run: prepend summary on a later idle incremental send. */
@@ -690,6 +686,22 @@ async function handoffAfterCompressTool(opts: {
   if (!buildCompactionPlan(sessionKey, s, t, pending, keepTurns)) {
     takeModelCompress(sessionKey);
     debug(`compress handoff skipped key=${s.key.slice(0, 12)}: nothing to compact (keepTurns=${keepTurns})`);
+    return false;
+  }
+
+  const candidate = buildCompactionPlan(sessionKey, s, t, pending, keepTurns)!;
+  const candidateRefs = syncMessageRefs(sessionKey, t.messages, { contextWindow: contextWindowTokens, preserve: deps.preserveConfig() })
+    .filter((r) => candidate.drop.includes(t.messages[r.index]));
+  try {
+    if (!candidateRefs.length) throw new Error("no compressible refs");
+    prepareKernelCompression(sessionKey, t.messages, {
+      startRef: pending.startRef ?? candidateRefs[0]!.ref,
+      endRef: pending.endRef ?? candidateRefs[candidateRefs.length - 1]!.ref,
+      summary: pending.summary, topic: pending.topic, revision: pending.revision,
+    }, contextWindowTokens, deps.preserveConfig());
+  } catch (err) {
+    takeModelCompress(sessionKey);
+    debug(`compress handoff rejected without cancelling key=${s.key.slice(0, 12)}: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
 
@@ -773,10 +785,7 @@ export function sessionSnapshot(
   const s = liveCursorSessions(sessionKey)[0];
   const pending = peekModelCompress(sessionKey);
   const windowTokens = contextWindow({ id: modelId });
-  const retained =
-    estimateTranscript(systemPrompt, tools, messages.slice(s?.compactedAt ?? 0)) +
-    (s?.summaryTokens ?? 0) +
-    cursorOverhead(modelId);
+  const retained = kernelResidentTokens(sessionKey, messages, systemPrompt, tools, windowTokens) + cursorOverhead(modelId);
   const acpPlan =
     s && !sessionKey.startsWith(ANON_PREFIX)
       ? kernelTurnPlan(sessionKey, messages, retained, windowTokens, { compactedAt: s.compactedAt, preserve })
@@ -804,7 +813,7 @@ export function sessionSnapshot(
     busy: s?.busy ?? null,
     unhandedTools: s?.pending.filter((p) => !p.handed).map((p) => p.name) ?? [],
     messageCount: messages.length,
-    retainedMessages: messages.length - (s?.compactedAt ?? 0),
+    retainedMessages: messages.length - (acpPlan?.coveredIndexes.size ?? 0),
     compressibleRefs: droppable,
     acpCompressibleRanges: acpPlan?.compressibleRanges ?? [],
     acpProtectedRanges: acpPlan?.protectedRanges ?? [],
@@ -828,12 +837,9 @@ export function sessionSnapshot(
 }
 
 function residentTokens(s: CursorSession | undefined, t: Transcript, modelId: string, replyDraft: any[] = []): number {
-  const at = s?.compactedAt ?? 0;
-  return (
-    estimateTranscript(t.systemPrompt, t.tools, t.messages.slice(at), replyDraft) +
-    (s?.summaryTokens ?? 0) +
-    cursorOverhead(modelId)
-  );
+  if (!s) return estimateTranscript(t.systemPrompt, t.tools, t.messages, replyDraft) + cursorOverhead(modelId);
+  return kernelResidentTokens(s.key, t.messages, t.systemPrompt, t.tools, contextWindow({ id: modelId })) +
+    estimateTranscript("", [], [], replyDraft) + cursorOverhead(modelId);
 }
 
 function attachContextNudge(s: CursorSession | undefined, text: string, nudge: string | undefined, resident: number): string {
@@ -1021,8 +1027,17 @@ export async function runTurn(opts: {
   const transcriptTokens = () => estimateTranscript(t.systemPrompt, t.tools, t.messages, reply.content);
   const contextTokens = () => transcriptTokens() + cursorOverhead(modelId);
 
-  const send = async (s: CursorSession, text: string, images: Image[] | undefined, sendOptions: any) =>
-    s.agent.send(images?.length ? { text, images } : text, sendOptions);
+  const send = async (s: CursorSession, text: string, images: Image[] | undefined, sendOptions: any) => {
+    if (s.replayView) {
+      const view = s.replayView;
+      const owners = new Set(view.messages.map((m) => coreMessageOwner(m.id)));
+      text = [renderTranscriptWithAcpView(effectiveSystem, t.messages, view.messages), COMPRESS_HANDOFF_NOTE, "Continue the task."].join("\n\n");
+      images = imagesOf(t.messages.filter((m) => owners.has(contextMessageKey(m))));
+      s.replayView = undefined;
+      s.sentFirst = true;
+    }
+    return s.agent.send(images?.length ? { text, images } : text, sendOptions);
+  };
   const sendFirst = async (s: CursorSession, prefix = "", acpView?: AcpWireView) => {
     s.sentFirst = true;
     const body = acpView
