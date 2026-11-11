@@ -181,6 +181,8 @@ export async function compactCheckpoint(opts: {
   needles: readonly string[];
   /** Refs already known to be part of the retained tail; never dropped. */
   keepRefs?: readonly string[];
+  /** A blob may mix dropped history with system/tail; never delete that blob. */
+  keepNeedles?: readonly string[];
 }): Promise<CompactResult> {
   const empty = { turnsBefore: 0, turnsAfter: 0, refsBefore: 0, refsAfter: 0, droppedRefs: 0 };
   const state: any = await opts.store.loadLatest(opts.agentId);
@@ -211,7 +213,11 @@ export async function compactCheckpoint(opts: {
       continue;
     }
     const payload = store.data.get(ref);
-    if (payload && payloadHoldsNeedle(payload, opts.needles)) dropped.push(ref);
+    if (payload && payloadHoldsNeedle(payload, opts.keepNeedles ?? []) && payloadHoldsNeedle(payload, opts.needles)) {
+      return { ...empty, turnsBefore, refsBefore: refsBefore.length, ok: false, reason: "prompt ref mixes compressed and retained content; replay required" };
+    }
+    if (payload && payloadHoldsNeedle(payload, opts.keepNeedles ?? [])) survivors.push(ref);
+    else if (payload && payloadHoldsNeedle(payload, opts.needles)) dropped.push(ref);
     else survivors.push(ref);
   }
   if (dropped.length === 0) {

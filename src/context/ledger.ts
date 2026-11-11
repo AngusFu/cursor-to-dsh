@@ -10,7 +10,7 @@ import {
 } from "./ledger-persist.ts";
 import { clearKernelSessions, kernelTurnPlan, type AcpPreserveConfig } from "./kernel.ts";
 import { resolveCompressionLayer } from "./layers.ts";
-import { fingerprint, incrementText, textOf } from "../prompt.ts";
+import { incrementText, textOf } from "../prompt.ts";
 
 export interface MessageRef {
   readonly ref: string;
@@ -82,27 +82,21 @@ export function syncMessageRefs(
   if (!messages.length) return [];
   const window = opts?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
   const tokenCount = opts?.tokenCount ?? estimateTokens(messages);
-  const kernelRefs = kernelTurnPlan(sessionId, messages, tokenCount, window, {
+  const plan = kernelTurnPlan(sessionId, messages, tokenCount, window, {
     compactedAt: opts?.compactedAt ?? 0,
     preserve: opts?.preserve,
-  }).refsByFingerprint;
+  });
 
   const out: MessageRef[] = [];
   const live = new Set<string>();
-  for (let i = 0; i < messages.length; i++) {
-    const m = messages[i]!;
-    const fp = fingerprint(m);
-    const ref = kernelRefs.get(fp);
-    if (!ref) continue;
+  for (const part of plan.messageRefs) {
+    const { fingerprint: fp, ref, index, text } = part;
     s.byFp.set(fp, ref);
     live.add(ref);
-    const rendered = incrementText(m) || textOf(m?.content);
-    const entry: MessageRef = { ref, index: i, fingerprint: fp, text: rendered, archived: false };
+    const entry: MessageRef = { ref, index, fingerprint: fp, text, archived: plan.coveredCoreIds.has(fp) };
     const existing = s.refs.find((r) => r.ref === ref);
     if (existing) {
-      existing.index = i;
-      existing.archived = false;
-      existing.text = rendered;
+      Object.assign(existing, entry);
       out.push(existing);
     } else {
       s.refs.push(entry);
@@ -138,7 +132,7 @@ export function refsInRange(sessionId: string, startRef: string, endRef: string)
 /** Message refs or block ids (bN) in the compressible index window. */
 export function compressibleRefs(sessionId: string, compactedAt: number, keepFrom: number): MessageRef[] {
   const s = ledgerOf(sessionId);
-  return s.refs.filter((r) => r.index >= compactedAt && r.index < keepFrom);
+  return s.refs.filter((r) => !r.archived && r.index >= compactedAt && r.index < keepFrom);
 }
 
 export interface CompressRefRange {
@@ -174,7 +168,7 @@ export function resolveCompressRefRange(
   if (!span?.length) {
     return { ok: false, reason: `invalid ref order ${startRef}..${endRef}` };
   }
-  const eligible = (r: MessageRef) => r.index >= compactedAt && r.index < keepFrom && droppable.has(r.ref);
+  const eligible = (r: MessageRef) => !r.archived && r.index >= compactedAt && r.index < keepFrom && droppable.has(r.ref);
   const first = span.find(eligible);
   const last = [...span].reverse().find(eligible);
   if (!first || !last) {

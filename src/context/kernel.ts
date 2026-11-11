@@ -3,6 +3,7 @@
  */
 import {
   createContentStore,
+  coveredMessageIds,
   createCore,
   createInitialState,
   defaultConfig,
@@ -20,8 +21,9 @@ import {
 import { buildCompressibleRanges, computeProtectedRefs } from "./acp-recommend.ts";
 import { buildAcpWireView, type AcpWireView } from "./acp-wire.ts";
 
-import { fingerprint, incrementText, textOf } from "../prompt.ts";
+import { incrementText, textOf, estimateTextTokens } from "../prompt.ts";
 import { loadContentStore, loadKernelState, persistContentStore, persistKernelState } from "./ledger-persist.ts";
+import { contextMessages, contextMessageKey, coreMessageOwner } from "./message-shape.ts";
 import { resolveCompressionLayer } from "./layers.ts";
 
 const core = createCore({
@@ -39,6 +41,11 @@ export interface KernelTurnPlan {
   compressibleRanges: CompressibleRange[];
   protectedRanges: ProtectedRange[];
   refsByFingerprint: Map<string, string>;
+  /** Each semantic piece, indexed back to its owning DSH message. */
+  messageRefs: { ref: string; index: number; fingerprint: string; text: string; ownerKey: string }[];
+  coveredIndexes: Set<number>;
+  coveredCoreIds: Set<string>;
+  compactedPrefix: number;
   /** Full model view after processTurn (filter / truncate / tags / …). */
   wireMessages: CoreMessage[];
   /** Wire text for user/developer messages after acp render-refs (text-only). */
@@ -63,35 +70,25 @@ function tierOfTopic(topic?: string): 1 | 2 | 3 {
   return 1;
 }
 
-function roleOf(m: any): CoreMessage["role"] {
-  const r = String(m?.role ?? "user");
-  if (r === "assistant" || r === "system" || r === "tool") return r;
-  return "user";
-}
-
 export function toCoreMessages(messages: readonly any[]): CoreMessage[] {
-  return messages.map((m) => {
-    const text = incrementText(m) || textOf(m?.content) || "";
-    const role = roleOf(m);
-    let contentType: CoreMessage["contentType"] = "text";
-    let toolName: string | undefined;
-    let toolCallId: string | undefined;
-    if (role === "tool") {
-      contentType = "tool-result";
-      toolName = m.toolName;
-      toolCallId = m.toolCallId;
-    } else if (role === "assistant" && Array.isArray(m?.content)) {
-      const blocks = m.content;
-      const toolCall = blocks.find((p: any) => p?.type === "toolCall");
-      if (toolCall) {
-        contentType = "tool-call";
-        toolName = toolCall.name;
-        toolCallId = toolCall.id;
-      } else if (blocks.some((p: any) => p?.type === "thinking")) {
-        contentType = "reasoning";
-      }
+  return contextMessages(messages).flatMap((m) => {
+    const id = contextMessageKey(m);
+    if (m.role === "toolResult") {
+      return [{ id, role: "tool", contentType: "tool-result", text: textOf(m.content), toolName: m.toolName, toolCallId: m.toolCallId } satisfies CoreMessage];
     }
-    return { id: fingerprint(m), role, contentType, text, toolName, toolCallId };
+    if (m.role !== "assistant") {
+      return [{ id, role: "user", contentType: "text", text: incrementText(m) } satisfies CoreMessage];
+    }
+    const blocks = m.content ?? [];
+    const calls = blocks.filter((b: any) => b.type === "toolCall");
+    if (!calls.length) return [{ id, role: "assistant", contentType: blocks.some((b: any) => b.type === "thinking") ? "reasoning" : "text", text: textOf(blocks) } satisfies CoreMessage];
+    const parts: CoreMessage[] = [];
+    const text = textOf(blocks);
+    if (text) parts.push({ id: `${id}:text`, role: "assistant", contentType: "text", text });
+    for (const [index, b] of calls.entries()) {
+      parts.push({ id: index === 0 ? id : `${id}:call:${index}`, role: "assistant", contentType: "tool-call", text: JSON.stringify(b.arguments ?? {}), toolName: b.name, toolCallId: b.id });
+    }
+    return parts;
   });
 }
 
@@ -119,7 +116,7 @@ function sessionKernel(sessionId: string, contextWindow: number, preserve?: AcpP
     };
     SESSIONS.set(sessionId, hit);
   }
-  hit.config = acpConfig(contextWindow, preserve);
+  if (preserve || hit.config.modelContextLimit !== contextWindow) hit.config = acpConfig(contextWindow, preserve);
   return hit;
 }
 
@@ -171,6 +168,7 @@ export function kernelTurnPlan(
   opts?: { compactedAt?: number; preserve?: AcpPreserveConfig },
 ): KernelTurnPlan {
   const sk = sessionKernel(sessionId, contextWindow, opts?.preserve);
+  messages = contextMessages(messages);
   const coreMessages = toCoreMessages(messages);
   const result = core.processTurn({
     messages: coreMessages,
@@ -201,12 +199,25 @@ export function kernelTurnPlan(
   const protectedRefs = computeProtectedRefs(coreMessages, result.state, sk.config, countTokens);
   const contextRanges = buildCompressibleRanges(coreMessages, result.state, sk.config, protectedRefs, countTokens);
 
+  const owners = new Map(messages.map((m, i) => [contextMessageKey(m), i]));
+  const covered = coveredMessageIds(sk.state);
+  const coveredIndexes = new Set<number>();
+  const messageRefs: KernelTurnPlan["messageRefs"] = [];
+  const coverageByIndex = new Map<number, boolean>();
   let keepFromIndex = messages.length;
-  for (let i = 0; i < coreMessages.length; i++) {
-    const ref = byRaw[coreMessages[i]!.id];
-    if (ref && protectedRefs.has(ref)) keepFromIndex = Math.min(keepFromIndex, i);
+  for (const cm of coreMessages) {
+    const ownerKey = coreMessageOwner(cm.id);
+    const index = owners.get(ownerKey)!;
+    coverageByIndex.set(index, (coverageByIndex.get(index) ?? true) && covered.has(cm.id));
+    const ref = byRaw[cm.id];
+    if (ref && ref !== "BLOCKED") messageRefs.push({ ref, index, fingerprint: cm.id, ownerKey, text: cm.contentType === "tool-call" ? `calls ${cm.toolName} (${cm.toolCallId}) with ${cm.text}` : cm.text ?? "" });
+    if (ref && protectedRefs.has(ref)) keepFromIndex = Math.min(keepFromIndex, index);
   }
-  keepFromIndex = Math.max(opts?.compactedAt ?? 0, keepFromIndex);
+  for (const [index, fullyCovered] of coverageByIndex) {
+    if (fullyCovered) coveredIndexes.add(index);
+  }
+  let compactedPrefix = 0;
+  while (coveredIndexes.has(compactedPrefix)) compactedPrefix++;
   const keepTurns = Math.max(1, messages.length - keepFromIndex);
 
   flushKernelState(sessionId);
@@ -216,6 +227,10 @@ export function kernelTurnPlan(
     compressibleRanges: contextRanges.compressible,
     protectedRanges: contextRanges.protected,
     refsByFingerprint,
+    messageRefs,
+    coveredIndexes,
+    coveredCoreIds: covered,
+    compactedPrefix,
     wireMessages: result.messages,
     taggedTextByFingerprint,
     nudge: result.nudge,
@@ -250,6 +265,38 @@ export function kernelNudgeForTurn(
   return renderNudgeText(plan.nudge, resolvePrompts()).text;
 }
 
+/** Prepare without publishing: no transport side effects on a kernel rejection. */
+export function prepareKernelCompression(
+  sessionId: string,
+  messages: readonly any[],
+  opts: { startRef: string; endRef: string; summary: string; topic?: string; revision: number },
+  contextWindow: number,
+  preserve?: AcpPreserveConfig,
+) {
+  const sk = sessionKernel(sessionId, contextWindow, preserve);
+  const before = sk.appliedRevision;
+  const coreMessages = toCoreMessages(messages);
+  const out = core.applyCompression({
+    ranges: [{ startRef: opts.startRef, endRef: opts.endRef, summary: opts.summary, topic: opts.topic ?? `T${tierOfTopic(opts.topic)}` }],
+    messages: coreMessages, state: sk.state, config: sk.config,
+  });
+  if (out.result.errors.length || out.result.blocksCreated !== 1) throw new Error(`Kernel compression rejected: ${out.result.errors.join("; ") || "no block created"}`);
+  const oldIds = coveredMessageIds(sk.state);
+  const covered = coveredMessageIds(out.state);
+  const newIds = new Set([...covered].filter((id) => !oldIds.has(id)));
+  const processed = core.processTurn({ messages: coreMessages, state: out.state, config: sk.config, tokenCount: sk.lastTokenCount, renderTags: "text-only", contentStore: structuredClone(sk.contentStore) });
+  return {
+    newIds, view: buildAcpWireView(processed.messages),
+    commit() {
+      if (sk.appliedRevision !== before) throw new Error("Kernel compression changed while transport was preparing");
+      sk.state = processed.state;
+      sk.contentStore = processed.contentStore;
+      sk.appliedRevision = opts.revision;
+      flushKernelState(sessionId);
+    },
+  };
+}
+
 export function kernelApplyCompression(
   sessionId: string,
   messages: readonly any[],
@@ -257,26 +304,13 @@ export function kernelApplyCompression(
   contextWindow: number,
   preserve?: AcpPreserveConfig,
 ): void {
-  const sk = sessionKernel(sessionId, contextWindow, preserve);
-  const tier = tierOfTopic(opts.topic);
-  const coreMessages = toCoreMessages(messages);
-  const ranges = [
-    {
-      startRef: opts.startRef,
-      endRef: opts.endRef,
-      summary: opts.summary,
-      topic: opts.topic ?? `T${tier}`,
-    },
-  ];
-  const out = core.applyCompression({
-    ranges,
-    messages: coreMessages,
-    state: sk.state,
-    config: sk.config,
-  });
-  sk.state = out.state;
-  sk.appliedRevision = opts.revision;
-  flushKernelState(sessionId);
+  prepareKernelCompression(sessionId, messages, opts, contextWindow, preserve).commit();
+}
+
+/** Budget comes from the same kernel model view as transport, never a prefix cursor. */
+export function kernelResidentTokens(sessionId: string, messages: readonly any[], system: string, tools: any[], contextWindow: number): number {
+  const plan = kernelTurnPlan(sessionId, messages, sessionKernel(sessionId, contextWindow).lastTokenCount, contextWindow);
+  return estimateTextTokens(system) + estimateTextTokens(JSON.stringify(tools)) + plan.wireMessages.reduce((n, m) => n + estimateTextTokens(m.text ?? ""), 0);
 }
 
 export function kernelStatus(sessionId: string, contextWindow: number, tokenCount: number, preserve?: AcpPreserveConfig) {

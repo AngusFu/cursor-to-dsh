@@ -20,7 +20,7 @@ import { resetCursorOverhead } from "../src/usage.ts";
 
 import { fakeCursor, adapterFor, nextId, text, sys, user, toolResult } from "./session-harness.ts";
 
-const SESSION = "sess-handoff-integration";
+const SESSION = `sess-handoff-integration-${process.pid}-${Date.now()}`;
 const SUMMARY =
   "Continuation: six turns of Q&A about ALPHA codes were folded; tail questions stay verbatim for the model.";
 const compressTool = {
@@ -38,7 +38,7 @@ const compressTool = {
 function longHistory() {
   const messages: any[] = [sys("SYS")];
   for (let i = 0; i < 6; i++) {
-    messages.push(user(`question ${i}: track ALPHA-NEEDLE-${i} in the codebase please`));
+    messages.push(user(`question ${i}: track ALPHA-NEEDLE-${i} in the codebase please ${"source ".repeat(1000)}`));
     messages.push({
       id: nextId(),
       role: "assistant",
@@ -87,7 +87,7 @@ beforeEach(() => {
 test("compress tool batch triggers handoff commit (M2 fallback) and clears pending", async () => {
   let deleteCalls = 0;
   const cursor = fakeCursor(async function* (ctx) {
-    const body = typeof ctx.msg === "string" ? ctx.msg : "";
+    const body = typeof ctx.msg === "string" ? ctx.msg : ctx.msg?.text ?? "";
     if (body.includes(SUMMARY_PREFIX) || body.includes("Context compressed")) {
       yield { type: "assistant", message: { content: [{ type: "text", text: "HANDOFF_OK" }] } };
       return;
@@ -134,5 +134,5 @@ test("compress tool batch triggers handoff commit (M2 fallback) and clears pendi
   assert.ok(live!.summary.includes("Continuation"), "summary stored on session");
   assert.equal(peekModelCompress(SESSION), undefined, "pending cleared");
   assert.ok(deleteCalls >= 1, "M2 deleteAgent ran when M3 store absent");
-  assert.ok(cursor.sends.some((s) => typeof s === "string" && s.includes(SUMMARY_PREFIX)), "handoff send carried summary");
+  assert.ok(cursor.sends.some((s) => typeof s === "string" && s.includes(SUMMARY)), "handoff replay carried the accepted kernel summary");
 });

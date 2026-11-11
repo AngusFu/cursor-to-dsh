@@ -21,6 +21,7 @@ import { type ApiKeyProfile, type KeyConfig, resolveActiveApiKey } from "./keys.
 import { PROVIDER_ID, setContextPreference } from "./models.ts";
 import { createCursorAgent, deleteCursorAgent, listCursorModels, prewarmCursor } from "./sdk.ts";
 import { kernelTurnPlan } from "./context/kernel.ts";
+import { readRequest } from "./transcript.ts";
 import { estimateTranscript } from "./prompt.ts";
 import { contextWindow, resolveModelId } from "./models.ts";
 import { closeAllCursorSessions, debug, sessionSnapshot, type CompactDeps } from "./session.ts";
@@ -257,12 +258,8 @@ export function apply(ctx: Context, config: Config): void {
     contextWindowForModel: (modelId: string) => contextWindow({ id: resolveModelId(modelId) }),
     sessionSnapshot: (sessionId: string, session: any, modelId: string) => {
       if (!session?.deriveMessages) return sessionSnapshot(sessionId, [], "", [], modelId);
-      const messages = Array.from(session.deriveMessages() ?? []);
+      const { messages, systemPrompt } = readRequest({ messages: Array.from(session.deriveMessages() ?? []) });
       const route = session.requestContext?.();
-      const sys = messages.find((m: { role?: string }) => (m as { role?: string })?.role === "system") as
-        | { content?: unknown }
-        | undefined;
-      const systemPrompt = typeof sys?.content === "string" ? sys.content : "";
       return {
         provider: route?.provider ?? "unknown",
         ...sessionSnapshot(sessionId, messages, systemPrompt, [], modelId, preserveConfig()),

@@ -42,7 +42,7 @@ function blocks(content: unknown, images?: Images): any[] {
   for (const b of content) {
     if (b?.type === "text" && b.text) out.push({ type: "text", text: b.text });
     else if (b?.type === "image") {
-      const image = b.offloaded === true ? undefined : images?.get(String(b.attachment?.attachmentId));
+      const image = b.offloaded === true ? undefined : b.data ? b : images?.get(String(b.attachment?.attachmentId));
       out.push(image ? { type: "image", data: image.data, mimeType: image.mimeType } : { type: "text", text: IMAGE_NOTE });
     }
     else if (b?.type === "file") out.push({ type: "text", text: `[file attachment: ${b.attachment?.name ?? b.attachment?.path ?? "file"}]` });
@@ -60,8 +60,8 @@ function assistantBlocks(content: unknown): any[] {
   const out: any[] = [];
   for (const b of Array.isArray(content) ? content : []) {
     if (b?.type === "text" && b.text) out.push({ type: "text", text: b.text });
-    else if (b?.type === "reasoning" && b.text) out.push({ type: "thinking", thinking: b.text });
-    else if (b?.type === "tool-call") out.push({ type: "toolCall", id: String(b.id), name: b.name, arguments: asObject(b.arguments) });
+    else if ((b?.type === "reasoning" || b?.type === "thinking") && (b.text || b.thinking)) out.push({ type: "thinking", thinking: b.thinking ?? b.text });
+    else if ((b?.type === "tool-call" || b?.type === "toolCall")) out.push({ type: "toolCall", id: String(b.id), name: b.name, arguments: asObject(b.arguments) });
   }
   return out;
 }
@@ -89,9 +89,10 @@ export function readRequest(options: any, images?: Images): Transcript {
         messages.push({ role: "assistant", content });
         break;
       }
+      case "toolResult":
       case "tool": {
         const id = String(m.toolCallId ?? m.source?.callId ?? "");
-        messages.push({ role: "toolResult", toolCallId: id, toolName: toolNames.get(id), isError: Boolean(m.isError), content: blocks(m.content, images) });
+        messages.push({ role: "toolResult", toolCallId: id, toolName: m.toolName ?? toolNames.get(id), isError: Boolean(m.isError), content: blocks(m.content, images) });
         break;
       }
     }
