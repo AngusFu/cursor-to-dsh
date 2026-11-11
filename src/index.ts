@@ -256,13 +256,14 @@ export function apply(ctx: Context, config: Config): void {
     contextEnabled,
     preserveConfig,
     contextWindowForModel: (modelId: string) => contextWindow({ id: resolveModelId(modelId) }),
+    cwdFor,
     sessionSnapshot: (sessionId: string, session: any, modelId: string) => {
-      if (!session?.deriveMessages) return sessionSnapshot(sessionId, [], "", [], modelId);
+      if (!session?.deriveMessages) return sessionSnapshot(sessionId, [], "", [], modelId, undefined, cwdFor(sessionId));
       const { messages, systemPrompt } = readRequest({ messages: Array.from(session.deriveMessages() ?? []) });
       const route = session.requestContext?.();
       return {
         provider: route?.provider ?? "unknown",
-        ...sessionSnapshot(sessionId, messages, systemPrompt, [], modelId, preserveConfig()),
+        ...sessionSnapshot(sessionId, messages, systemPrompt, [], modelId, preserveConfig(), cwdFor(sessionId)),
       };
     },
   };

@@ -28,6 +28,7 @@ const PARAM_ALIASES: Record<string, string> = {
   startId: "startRef",
   endId: "endRef",
   blockId: "chunkId",
+  imageRef: "imageRef",
   query: "query",
   summary: "summary",
   topic: "topic",

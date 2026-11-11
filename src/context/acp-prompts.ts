@@ -9,7 +9,7 @@ const DSH_TOOLS_SECTION = `TOOLS (DSH · Cursor route)
 
 - cursor_context_compress — Replace a contiguous range of older conversation with a continuation summary you write. Required summary (≥32 chars). Optional inclusive startRef/endRef from cursor_context_status (e.g. m00005..m00020). Optional topic (t2:/t3: for tier). Optional keepTurns override. Do not call when status shows no compressible ranges.
 - cursor_context_status — Context status with compressible/protected ranges, refs, and budget. Call before compress to pick refs.
-- cursor_context_decompress — Page archived原文 from a past compression (ref or chunkId).
+- cursor_context_decompress — Page archived原文 from a past compression (ref or chunkId). Pass imageRef (an mNNNNN ref) to restore a folded image to a file you open with the read tool; imageRef:"list" shows what is restorable.
 - cursor_context_search — Search archived compression text by keyword.
 
 Use ref IDs from <acp> tags in the transcript or from status (mNNNNN). Never echo the <acp> XML tags in your replies.

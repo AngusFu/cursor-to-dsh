@@ -1,7 +1,7 @@
 import { test, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -14,6 +14,7 @@ import { toCoreMessages, kernelTurnPlan, kernelApplyCompression, kernelAppliedRe
 import { syncMessageRefs, decompressChunk, ledgerStats } from "../src/context/ledger.ts";
 import { scheduleModelCompress, clearAllPendingCompress } from "../src/context/pending.ts";
 import { liveCursorSessions, closeAllCursorSessions, sessionSnapshot } from "../src/session.ts";
+import { resolveImageRestore } from "../src/context/image-restore.ts";
 import { applyTierDistillation } from "../src/context/distill.ts";
 import { CONTEXT_DEFAULTS } from "../src/ui-state.ts";
 import { fakeCursor, adapterFor, text, sys, user, toolResult, say } from "./session-harness.ts";
@@ -129,6 +130,50 @@ test("M2 handoff replays system, retained tool context, tail and image exactly o
   assert.match(replay.text, /Only the tools attached/);
   assert.equal((replay.text.match(/TAIL_ONLY_SECRET_7788/g) ?? []).length, 1);
   assert.deepEqual(replay.images, [{ data: "TAIL_IMAGE_BYTES", mimeType: "image/png" }]);
+});
+
+test("folded image is archived with a ref placeholder; M2 still replays only the retained tail image", async () => {
+  const session = sid();
+  const root = mkdtempSync(join(tmpdir(), "cursor-img-handoff-"));
+  const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+  let deletes = 0;
+  const cursor = fakeCursor(async function* (ctx) {
+    const body = typeof ctx.msg === "string" ? ctx.msg : ctx.msg.text;
+    if (body.includes("Context compressed")) { yield say("HANDOFF_REPLAY_OK"); return; }
+    await ctx.callTool(compress.name, {}, "compress-call");
+  });
+  const adapter = adapterFor(cursor, {
+    compact: compactDeps(cursor, () => deletes++),
+    cwdFor: () => root,
+    readImage: async (ref: any) => {
+      if (ref.attachmentId === "folded-image") return { data: PNG, mimeType: "image/png" };
+      return { data: "TAIL_IMAGE_BYTES", mimeType: "image/png" };
+    },
+  });
+  const folded = { ...user(long(0)), content: [...text(long(0)), { type: "image", attachment: { attachmentId: "folded-image", mediaType: "image/png" } }] };
+  const tail = { ...user("TAIL_ONLY_SECRET_7788"), content: [...text("TAIL_ONLY_SECRET_7788"), { type: "image", attachment: { attachmentId: "tail-image" } }] };
+  const base = [sys("SYSTEM_MUST_SURVIVE_1111"), folded, ...history().slice(1), tail];
+  const r1 = await stream(adapter, session, base, [compress]);
+  scheduleModelCompress(session, summary, { keepTurns: 4 });
+  const r2 = await stream(adapter, session, [...base, r1.assistant, toolResult("compress-call", "compression scheduled")], [compress]);
+  assert.equal(r2.text, "HANDOFF_REPLAY_OK");
+  assert.equal(deletes, 1);
+  const replay = cursor.sends.at(-1);
+  assert.match(replay.text, /SYSTEM_MUST_SURVIVE_1111/);
+  assert.match(replay.text, /TAIL_ONLY_SECRET_7788/);
+  assert.match(replay.text, /\[image: png 1x1 · m\d+\]/);
+  assert.match(replay.text, /cursor_context_decompress\(\{ imageRef \}\)/);
+  assert.deepEqual(replay.images, [{ data: "TAIL_IMAGE_BYTES", mimeType: "image/png" }]);
+  const listed = resolveImageRestore({ sessionId: session, imageRef: "list", sessionRoot: root });
+  assert.equal(listed.ok, true);
+  assert.match(listed.text, /Restorable images/);
+  const ref = listed.text.match(/m\d+/)?.[0];
+  assert.ok(ref);
+  const restored = resolveImageRestore({ sessionId: session, imageRef: ref!, sessionRoot: root });
+  assert.equal(restored.ok, true, restored.text);
+  assert.deepEqual(readFileSync(restored.images![0]!.path), Buffer.from(PNG, "base64"));
+  const snap = sessionSnapshot(session, readRequest({ messages: base }).messages, "SYSTEM_MUST_SURVIVE_1111", [compress], "m", preserve);
+  assert.ok((snap.restorableImages as string[]).some((line) => line.includes(ref!)));
 });
 
 test("idle M2 subrange preserves unselected prefix; archive refs/body and budget match kernel coverage", async () => {

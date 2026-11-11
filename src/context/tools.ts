@@ -16,6 +16,7 @@ import {
   syncMessageRefs,
 } from "./ledger.ts";
 import { cursorContextParamDescription, cursorContextToolDescription } from "./acp-tool-surface.ts";
+import { imageRestoreMode, resolveImageRestore } from "./image-restore.ts";
 import { planCompaction } from "./compact.ts";
 import { contextMessages } from "./message-shape.ts";
 import { kernelTurnPlan } from "./kernel.ts";
@@ -58,6 +59,7 @@ export interface ContextToolsDeps {
   preserveConfig: () => { preserveRecentMessages: number; preserveRecentTokens: number };
   contextWindowForModel: (modelId: string) => number;
   sessionSnapshot: (sessionId: string, session: any, modelId: string) => Record<string, unknown>;
+  cwdFor?: (sessionId: string) => string;
 }
 
 function assertContextManagement(deps: ContextToolsDeps): void {
@@ -306,12 +308,20 @@ export function registerContextTools(ctx: Context, deps: ContextToolsDeps): (() 
       description: tdesc(
         DECOMPRESS_TOOL_NAME,
         "Page through archived原文 from a past compression. Use chunkId or message ref; offset/limit paginate UTF-8 text.",
-      ),
+      ) + ' Pass imageRef (an mNNNNN ref) to restore a folded image to a file you open with the read tool; imageRef:"list" shows what is restorable. Independent of ref/chunkId.',
       parameters: {
         ref: { type: "string", description: "Message ref inside an archive chunk." },
         chunkId: {
           type: "string",
           description: pdesc(DECOMPRESS_TOOL_NAME, "chunkId", "Archive chunk id (c00001…) from search or status."),
+        },
+        imageRef: {
+          type: "string",
+          description: pdesc(
+            DECOMPRESS_TOOL_NAME,
+            "imageRef",
+            'Optional mNNNNN message ref whose IMAGE payload you want restored (an image that was folded away). Pass "list" to enumerate every image currently restorable. Restored images are written to host-readable files and their paths returned — open them with the read tool. Independent of ref/chunkId.',
+          ),
         },
         offset: {
           type: "integer",
@@ -329,6 +339,29 @@ export function registerContextTools(ctx: Context, deps: ContextToolsDeps): (() 
       async execute(args, exec) {
         assertContextManagement(deps);
         const sessionId = assertCursorSession(exec);
+        const mode = imageRestoreMode(args.imageRef);
+        if (mode.mode === "error") throw new Error(mode.message);
+        if (mode.mode === "image") {
+          const restored = resolveImageRestore({
+            sessionId,
+            imageRef: mode.ref,
+            sessionRoot: deps.cwdFor?.(sessionId),
+          });
+          if (!restored.ok) throw new Error(restored.text);
+          return {
+            ok: true,
+            mode: restored.mode ?? "image",
+            imageRef: restored.imageRef ?? mode.ref,
+            images: (restored.images ?? []).map((im) => ({
+              path: im.path,
+              mediaType: im.mediaType,
+              bytes: im.bytes,
+              width: im.width ?? null,
+              height: im.height ?? null,
+            })),
+            text: restored.text,
+          };
+        }
         const page = decompressChunk({
           sessionId,
           ref: args.ref,

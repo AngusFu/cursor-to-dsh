@@ -63,6 +63,12 @@ import { setContextFillSnapshot } from "./context/fill-cache.ts";
 import { coreMessageOwner, contextMessageKey } from "./context/message-shape.ts";
 import { COMPRESS_TOOL_NAME } from "./context/names.ts";
 import {
+  appendImagePlaceholders,
+  archiveSessionImages,
+  describeRestorable,
+  setImageRestoreRoot,
+} from "./context/image-restore.ts";
+import {
   peekModelCompress,
   rescheduleModelCompress,
   scheduleModelCompress,
@@ -104,6 +110,8 @@ class CursorSession {
   sentFirst = false;
   /** Full effective kernel view to replay after a destructive M2 rebuild. */
   replayView?: AcpWireView;
+  /** Owner keys whose images are still live in the replay view (not folded). */
+  replayImageKeys?: Set<string>;
   pending: PendingCall[] = [];
   lastCallAt = 0;
   toolsKey = "";
@@ -551,12 +559,22 @@ async function commitModelCompress(opts: {
   const refs = syncMessageRefs(sessionKey, t.messages, { contextWindow: windowTokens, preserve });
   const selected = refs.filter((r) => plan.drop.includes(t.messages[r.index]));
   if (!selected.length) return undefined;
+  setImageRestoreRoot(sessionKey, cwd);
+  archiveSessionImages({ sessionId: sessionKey, messages: t.messages, refs, sessionRoot: cwd });
+  const foldedNotes = archiveSessionImages({
+    sessionId: sessionKey,
+    messages: t.messages,
+    refs,
+    sessionRoot: cwd,
+    onlyIndexes: new Set(selected.map((r) => r.index)),
+  });
+  const summary = appendImagePlaceholders(pending.summary, foldedNotes);
   let staged;
   try {
     staged = prepareKernelCompression(sessionKey, t.messages, {
       startRef: pending.startRef ?? selected[0]!.ref,
       endRef: pending.endRef ?? selected[selected.length - 1]!.ref,
-      summary: pending.summary, topic: pending.topic, revision: pending.revision,
+      summary, topic: pending.topic, revision: pending.revision,
     }, windowTokens, preserve);
   } catch (err) {
     debug(`model-compress rejected key=${s.key.slice(0, 12)}: ${err instanceof Error ? err.message : String(err)}`);
@@ -564,13 +582,17 @@ async function commitModelCompress(opts: {
   }
   const dropped = refs.filter((r) => staged.newIds.has(r.fingerprint));
   const visibleOwners = new Set(staged.view.messages.map((m) => coreMessageOwner(m.id)));
+  const droppedIndexes = new Set(dropped.map((r) => r.index));
   const kept = t.messages.filter((m) => visibleOwners.has(contextMessageKey(m)));
+  // A compressed block may reuse a dropped message's owner id; do not treat its
+  // raw pixels as still live in the model view.
+  const keptForImages = t.messages.filter((m, i) => visibleOwners.has(contextMessageKey(m)) && !droppedIndexes.has(i));
   let outcome;
   let usedM2 = false;
   try {
-    outcome = imagesOf(kept)?.length ? undefined : await runHostCompaction({
+    outcome = imagesOf(keptForImages)?.length ? undefined : await runHostCompaction({
       store: deps.store, agentId, cwd, keepTurns,
-      summary: pending.summary, keepFrom: plan.keepFrom,
+      summary, keepFrom: plan.keepFrom,
       needles: [...dropped.map((r) => r.text), s.summary].filter(Boolean),
       keepNeedles: [t.systemPrompt, ...kept.map(incrementText), ...staged.view.messages.filter((m) => m.contentType === "tool-call").map((m) => m.text ?? "")].filter(Boolean),
     });
@@ -595,11 +617,14 @@ async function commitModelCompress(opts: {
     dropSession(s);
     throw err;
   }
-  if (usedM2) s.replayView = staged.view;
+  if (usedM2) {
+    s.replayView = staged.view;
+    s.replayImageKeys = new Set(keptForImages.map(contextMessageKey));
+  }
   archiveCompression({
     sessionId: sessionKey, revision: pending.revision,
-    summary: pending.summary, dropRefs: dropped.map((r) => r.ref),
-    dropText: dropped.map((r) => r.text).join("\n\n"), topic: pending.topic,
+    summary, dropRefs: dropped.map((r) => r.ref),
+    dropText: [dropped.map((r) => r.text).join("\n\n"), ...foldedNotes.map((n) => n.placeholder)].filter(Boolean).join("\n\n"), topic: pending.topic,
   });
   const applied = kernelTurnPlan(sessionKey, t.messages, staged.view.messages.reduce((n, m) => n + estimateTextTokens(m.text ?? ""), 0), windowTokens, { preserve });
   s.compactedAt = applied.compactedPrefix;
@@ -781,7 +806,9 @@ export function sessionSnapshot(
   tools: any[],
   modelId: string,
   preserve?: AcpPreserveConfig,
+  cwd?: string,
 ) {
+  if (cwd) setImageRestoreRoot(sessionKey, cwd);
   const s = liveCursorSessions(sessionKey)[0];
   const pending = peekModelCompress(sessionKey);
   const windowTokens = contextWindow({ id: modelId });
@@ -820,6 +847,7 @@ export function sessionSnapshot(
     preserveKeepFrom: keepFrom,
     estimatedRetainedTokens: s ? retained : null,
     ledger: stats,
+    restorableImages: describeRestorable(sessionKey, cwd),
     kernel: s && !sessionKey.startsWith(ANON_PREFIX) ? kernelStatus(sessionKey, windowTokens, retained, preserve) : null,
     panel:
       s && !sessionKey.startsWith(ANON_PREFIX)
@@ -1011,12 +1039,14 @@ export async function runTurn(opts: {
   }
 
   if (!sessionKey.startsWith(ANON_PREFIX)) {
-    syncMessageRefs(sessionKey, t.messages, {
+    const refs = syncMessageRefs(sessionKey, t.messages, {
       tokenCount: estimateTranscript(t.systemPrompt, t.tools, t.messages),
       contextWindow: contextWindowTokens,
       compactedAt: liveCursorSessions(sessionKey)[0]?.compactedAt ?? 0,
       preserve: deps.compact?.preserveConfig(),
     });
+    setImageRestoreRoot(sessionKey, cwd);
+    archiveSessionImages({ sessionId: sessionKey, messages: t.messages, refs, sessionRoot: cwd });
   }
 
   let params = modelParams(model, opts.reasoning);
@@ -1030,10 +1060,11 @@ export async function runTurn(opts: {
   const send = async (s: CursorSession, text: string, images: Image[] | undefined, sendOptions: any) => {
     if (s.replayView) {
       const view = s.replayView;
-      const owners = new Set(view.messages.map((m) => coreMessageOwner(m.id)));
+      const owners = s.replayImageKeys ?? new Set(view.messages.map((m) => coreMessageOwner(m.id)));
       text = [renderTranscriptWithAcpView(effectiveSystem, t.messages, view.messages), COMPRESS_HANDOFF_NOTE, "Continue the task."].join("\n\n");
       images = imagesOf(t.messages.filter((m) => owners.has(contextMessageKey(m))));
       s.replayView = undefined;
+      s.replayImageKeys = undefined;
       s.sentFirst = true;
     }
     return s.agent.send(images?.length ? { text, images } : text, sendOptions);
