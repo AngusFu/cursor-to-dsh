@@ -231,6 +231,8 @@ test("acpContextSectionText includes marker and compress tools", () => {
   const text = acpContextSectionText();
   assert.match(text, /\[acp-context\]/);
   assert.match(text, /cursor_context_compress/);
+  assert.match(text, /Do NOT call billion-context/);
+  assert.match(text, /acp_status/);
 });
 
 test("acpSystemPromptAddition appends full acp standing prompt once", () => {

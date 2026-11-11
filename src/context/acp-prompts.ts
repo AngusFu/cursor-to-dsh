@@ -12,7 +12,9 @@ const DSH_TOOLS_SECTION = `TOOLS (DSH · Cursor route)
 - cursor_context_decompress — Page archived原文 from a past compression (ref or chunkId).
 - cursor_context_search — Search archived compression text by keyword.
 
-Use ref IDs from <acp> tags in the transcript or from status (mNNNNN). Never echo the <acp> XML tags in your replies.`;
+Use ref IDs from <acp> tags in the transcript or from status (mNNNNN). Never echo the <acp> XML tags in your replies.
+
+Do NOT call billion-context (bili-native) tools on Cursor-routed sessions: compress, decompress, search_context, acp_status. They target a different pipeline and do not shrink the Cursor checkpoint. On this route, context management is only via cursor_context_* above.`;
 
 /** Standing acp block for DSH system prompt / Cursor wire (marker + philosophy + rules + tags). */
 export function acpContextSectionText(): string {
