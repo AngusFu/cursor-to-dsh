@@ -349,6 +349,49 @@ window.__ModuleLoader__.load({
       request(`/usage?provider=${encodeURIComponent(provider)}${force ? "&force=1" : ""}`);
     const writeUsageMode = (mode) => request("/usage/display", "POST", { mode });
 
+    /** Shared fetch per provider so Settings refresh and the composer pill see the same snapshot. */
+    const usageSyncStore = (() => {
+      const subs = new Set();
+      const byProvider = Object.create(null);
+      const pending = Object.create(null);
+      const notify = (provider) => {
+        const snap = byProvider[provider];
+        for (const fn of subs) fn(provider, snap);
+      };
+      const fetchShared = (force, provider) => {
+        const inflight = pending[provider];
+        if (inflight) {
+          if (force && !inflight.force) inflight.force = true;
+          return inflight.promise;
+        }
+        const job = { force: Boolean(force), promise: null };
+        job.promise = readUsage(job.force, provider).then(
+          (next) => {
+            delete pending[provider];
+            byProvider[provider] = next;
+            notify(provider);
+            return next;
+          },
+          (cause) => {
+            delete pending[provider];
+            throw cause;
+          },
+        );
+        pending[provider] = job;
+        return job.promise;
+      };
+      return {
+        subscribe(fn) {
+          subs.add(fn);
+          return () => subs.delete(fn);
+        },
+        snapshot(provider) {
+          return byProvider[provider];
+        },
+        fetch: fetchShared,
+      };
+    })();
+
     function tp(key, value) {
       return text(key).replace("{t}", value);
     }
@@ -435,25 +478,31 @@ window.__ModuleLoader__.load({
 
     /**
      * One snapshot source for both surfaces.
-     * `shouldPoll(usage)` decides the 60s timer; the page pauses it while hidden and
-     * refreshes immediately when it becomes visible again.
+     * `shouldPoll(usage)` decides the 60s timer (poll uses force=1 to bypass quota cache);
+     * the page pauses it while hidden and refreshes immediately when it becomes visible again.
      */
     function useUsage(shouldPoll, provider) {
-      const [usage, setUsage] = useState();
+      const [usage, setUsage] = useState(() => usageSyncStore.snapshot(provider));
       const [busy, setBusy] = useState(false);
       const [error, setError] = useState();
 
-      const load = useCallback((manual = false) => {
+      const load = useCallback((manual = false, force = manual) => {
         if (manual) setBusy(true);
-        return readUsage(manual, provider).then(
+        return usageSyncStore.fetch(force, provider).then(
           (next) => { setUsage(next); setError(void 0); return next; },
           (cause) => { setError(cause instanceof Error ? cause.message : String(cause)); return void 0; },
         ).finally(() => { if (manual) setBusy(false); });
       }, [provider]);
 
+      useEffect(() => usageSyncStore.subscribe((p, snap) => {
+        if (p !== provider || snap === undefined) return;
+        setUsage(snap);
+        setError(void 0);
+      }), [provider]);
+
       useEffect(() => {
         let alive = true;
-        readUsage(false, provider).then(
+        usageSyncStore.fetch(false, provider).then(
           (next) => { if (alive) { setUsage(next); setError(void 0); } },
           (cause) => { if (alive) setError(cause instanceof Error ? cause.message : String(cause)); },
         );
@@ -463,7 +512,7 @@ window.__ModuleLoader__.load({
       const poll = shouldPoll(usage);
       useEffect(() => {
         if (!poll) return undefined;
-        const refresh = () => { if (!document.hidden) void load(false); };
+        const refresh = () => { if (!document.hidden) void load(false, true); };
         const timer = setInterval(refresh, USAGE_POLL_MS);
         document.addEventListener("visibilitychange", refresh);
         return () => { clearInterval(timer); document.removeEventListener("visibilitychange", refresh); };
@@ -576,7 +625,7 @@ window.__ModuleLoader__.load({
       const modelProvider = directory ? (dirState?.current?.provider ?? null) : null;
       const covered = !directory || quotaProviderOf(modelProvider) !== null;
       const activeProvider = quotaProviderOf(modelProvider) ?? "cursor";
-      const shouldPoll = (value) => Boolean(value) && value.mode !== "off";
+      const shouldPoll = (value) => !value || value.mode !== "off";
       const cursorState = useUsage(shouldPoll, "cursor");
       const copilotState = useUsage(shouldPoll, "copilot");
       const [open, setOpen] = useState(false);
