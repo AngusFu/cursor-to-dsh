@@ -33,15 +33,22 @@ export interface AdapterDeps {
   contextEnabled?: () => boolean;
 }
 
+type CatalogCache = { models: CatalogModel[]; live: boolean; hadKey: boolean; at: number };
+
 export class CursorAdapter extends LlmAdapter {
   private readonly deps: AdapterDeps;
-  private catalog: { models: CatalogModel[]; live: boolean; at: number } | undefined;
+  private catalog: CatalogCache | undefined;
   private loading: Promise<CatalogModel[]> | undefined;
   private readonly images = new Map<string, Image>();
 
   constructor(deps: AdapterDeps) {
     super();
     this.deps = deps;
+  }
+
+  /** Drop cached catalog so the next list uses fresh credentials (DSH restart / key change). */
+  invalidateCatalog(): void {
+    this.catalog = undefined;
   }
 
   override providerInfo(provider: string): any {
@@ -130,7 +137,12 @@ export class CursorAdapter extends LlmAdapter {
 
   private async models(): Promise<CatalogModel[]> {
     const c = this.catalog;
-    if (c && Date.now() - c.at < (c.live ? CATALOG_TTL_MS : CATALOG_RETRY_MS)) return c.models;
+    if (c) {
+      const age = Date.now() - c.at;
+      if (c.live && age < CATALOG_TTL_MS) return c.models;
+      // No key on that load: credentials may appear later; do not pin the 6-model fallback.
+      if (!c.live && c.hadKey && age < CATALOG_RETRY_MS) return c.models;
+    }
     this.loading ??= this.load().finally(() => (this.loading = undefined));
     return this.loading;
   }
@@ -144,13 +156,17 @@ export class CursorAdapter extends LlmAdapter {
     } catch (err) {
       debug(`catalog failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+    const hadKey = Boolean(apiKey);
     const live = models.length > 0;
     if (live && apiKey) {
       const modelId = models.find((m) => m.id === "default")?.id ?? models[0].id;
       this.deps.prewarm?.({ apiKey, modelId });
     }
-    this.catalog = { models: live ? models : FALLBACK_MODELS, live, at: Date.now() };
-    return this.catalog.models;
+    const out = live ? models : FALLBACK_MODELS;
+    if (hadKey || live) {
+      this.catalog = { models: out, live, hadKey, at: Date.now() };
+    }
+    return out;
   }
 }
 

@@ -510,6 +510,31 @@ test("models: live catalog with efforts, fallback when the catalog is unavailabl
   assert.equal((await keyless.listModels("cursor")).length, FALLBACK_MODELS.length);
 });
 
+test("models: refetches live catalog when key appears after keyless listModels", async () => {
+  let key: string | undefined;
+  const adapter = adapterFor(fakeCursor(async function* () {}), {
+    resolveApiKey: async () => key,
+    listModels: async () => [{ id: "live-one", displayName: "Live" }],
+  });
+  assert.deepEqual((await adapter.listModels("cursor")).map((m: any) => m.id), FALLBACK_MODELS.map((m) => m.id));
+  key = "k";
+  assert.deepEqual((await adapter.listModels("cursor")).map((m: any) => m.id), ["live-one"]);
+});
+
+test("models: invalidateCatalog forces a reload", async () => {
+  let calls = 0;
+  const adapter = adapterFor(fakeCursor(async function* () {}), {
+    listModels: async () => {
+      calls++;
+      return [{ id: `m${calls}`, displayName: "M" }];
+    },
+  });
+  assert.deepEqual((await adapter.listModels("cursor")).map((m: any) => m.id), ["m1"]);
+  assert.deepEqual((await adapter.listModels("cursor")).map((m: any) => m.id), ["m1"]);
+  adapter.invalidateCatalog();
+  assert.deepEqual((await adapter.listModels("cursor")).map((m: any) => m.id), ["m2"]);
+});
+
 test("prewarm runs after a live catalog, not on the fallback catalog", async () => {
   const warmed: any[] = [];
   const cursor = fakeCursor(async function* () {

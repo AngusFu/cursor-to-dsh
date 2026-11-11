@@ -109,9 +109,6 @@ export function apply(ctx: Context, config: Config): void {
   const contextEnabled = () => readContextManagement(getConfig()).enabled;
 
   setContextPreference(cfgString(config?.context, "min"));
-  (ctx as any).on?.("loader/volatile-update", () => {
-    setContextPreference(cfgString(config?.context, "min"));
-  });
 
   // Own settings page (Settings → Cursor); disable auto-generated form.
   ctx.inject?.(["settings"], (sctx: any) => {
@@ -207,6 +204,21 @@ export function apply(ctx: Context, config: Config): void {
     { provider: PROVIDER_ID, displayName: "Cursor", settingsNs: (ctx as any).fiber?.entry?.options.id ?? name, settingsPath: [] },
   ]);
   (ctx as any).llm.registerAdapter([PROVIDER_ID], adapter);
+
+  const refreshCatalog = () => {
+    adapter.invalidateCatalog();
+    void resolveApiKey()
+      .then((key) => (key ? adapter.listModels(PROVIDER_ID) : undefined))
+      .catch(() => {});
+  };
+
+  (ctx as any).on?.("loader/volatile-update", () => {
+    setContextPreference(cfgString(config?.context, "min"));
+    refreshCatalog();
+  });
+
+  refreshCatalog();
+
   ctx.effect(() => () => closeAllCursorSessions(), "cursor sessions");
 
   /**
@@ -284,9 +296,4 @@ export function apply(ctx: Context, config: Config): void {
       disposeAcpPrompt?.();
     };
   }, "cursor-to-dsh: context surface");
-
-  void resolveApiKey()
-    .then((key) => (key ? adapter.listModels(PROVIDER_ID) : undefined))
-    .catch(() => {});
-
 }
