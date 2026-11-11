@@ -11,6 +11,10 @@ import { closeAllCursorSessions, cursorSessionCount } from "../src/session.ts";
 import { CONTEXT_DEFAULTS } from "../src/ui-state.ts";
 import { cursorOverhead, resetCursorOverhead } from "../src/usage.ts";
 
+import { isolateLedgerHome } from "./isolate-ledger-home.ts";
+
+isolateLedgerHome("cursor-session-test-");
+
 /** Scripted fake Cursor agent. Each send runs `script(ctx)` as the model. */
 function fakeCursor(script: (ctx: any) => AsyncGenerator<any, any, void>) {
   const created: any[] = [];

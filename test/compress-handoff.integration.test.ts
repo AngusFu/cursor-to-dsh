@@ -19,6 +19,9 @@ import { closeAllCursorSessions, liveCursorSessions } from "../src/session.ts";
 import { resetCursorOverhead } from "../src/usage.ts";
 
 import { fakeCursor, adapterFor, nextId, text, sys, user, toolResult } from "./session-harness.ts";
+import { isolateLedgerHome } from "./isolate-ledger-home.ts";
+
+isolateLedgerHome("cursor-handoff-test-");
 
 const SESSION = `sess-handoff-integration-${process.pid}-${Date.now()}`;
 const SUMMARY =
@@ -134,5 +137,12 @@ test("compress tool batch triggers handoff commit (M2 fallback) and clears pendi
   assert.ok(live!.summary.includes("Continuation"), "summary stored on session");
   assert.equal(peekModelCompress(SESSION), undefined, "pending cleared");
   assert.ok(deleteCalls >= 1, "M2 deleteAgent ran when M3 store absent");
-  assert.ok(cursor.sends.some((s) => typeof s === "string" && s.includes(SUMMARY)), "handoff replay carried the accepted kernel summary");
+  const replay = cursor.sends.find((s) => typeof s === "string" && s.includes(SUMMARY));
+  assert.ok(replay, "handoff replay carried the accepted kernel summary");
+  assert.match(
+    replay,
+    /Do not repeat the 10 characters of assistant text already emitted in the interrupted run/,
+    "M2 replay keeps the dedup hint for already-emitted 'scheduling' text",
+  );
+  assert.match(replay, /Continue the task\./);
 });

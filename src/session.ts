@@ -62,6 +62,7 @@ import {
 import { setContextFillSnapshot } from "./context/fill-cache.ts";
 import { coreMessageOwner, contextMessageKey } from "./context/message-shape.ts";
 import { COMPRESS_TOOL_NAME } from "./context/names.ts";
+import { withoutBiliAcpTools } from "./context/bili-tools.ts";
 import {
   appendImagePlaceholders,
   archiveSessionImages,
@@ -112,6 +113,10 @@ class CursorSession {
   replayView?: AcpWireView;
   /** Owner keys whose images are still live in the replay view (not folded). */
   replayImageKeys?: Set<string>;
+  /** Handoff suffix (dedup hint + continue) kept when send() rebuilds from replayView. */
+  replaySuffix?: string;
+  /** Assistant chars already forwarded to the host in the open (possibly interrupted) run. */
+  emittedRunChars = 0;
   pending: PendingCall[] = [];
   lastCallAt = 0;
   toolsKey = "";
@@ -366,10 +371,13 @@ function toolsKeyOf(tools: any[]): string {
 
 /** Point the session at the current tools; returns the send options that carry them. */
 function syncTools(s: CursorSession, tools: any[]): any {
-  s.toolsKey = toolsKeyOf(tools);
-  s.toolNames = tools.map((t) => t?.name).filter(Boolean);
+  // Cursor-route only: do not forward billion-context / acp-kernel tools.
+  // Other providers keep the original tool list on the DSH side.
+  const forwarded = withoutBiliAcpTools(tools);
+  s.toolsKey = toolsKeyOf(forwarded);
+  s.toolNames = forwarded.map((t) => t?.name).filter(Boolean);
   const custom: Record<string, any> = {};
-  for (const tool of tools) {
+  for (const tool of forwarded) {
     if (!tool?.name) continue;
     custom[tool.name] = {
       description: tool.description || tool.name,
@@ -449,6 +457,26 @@ async function continueWithNewTools(
 
 const COMPRESS_HANDOFF_NOTE =
   "[Context compressed. Earlier turns are folded into the summary above. Do not repeat assistant text already emitted in the interrupted run; continue from this handoff point only.]";
+
+function interruptedEmittedChars(s: CursorSession): number {
+  let n = s.emittedRunChars;
+  for (const msg of s.events) {
+    if (msg?.type !== "assistant") continue;
+    for (const b of msg.message?.content ?? []) {
+      if (b?.type === "text" && b.text) n += b.text.length;
+    }
+  }
+  return n;
+}
+
+function handoffReplaySuffix(s: CursorSession): string {
+  const n = interruptedEmittedChars(s);
+  const dedup =
+    n > 0
+      ? `Do not repeat the ${n} characters of assistant text already emitted in the interrupted run.`
+      : "";
+  return [dedup, "Continue the task."].filter(Boolean).join("\n\n");
+}
 
 /**
  * Rewrite the Cursor checkpoint from a model-scheduled compression.
@@ -620,6 +648,8 @@ async function commitModelCompress(opts: {
   if (usedM2) {
     s.replayView = staged.view;
     s.replayImageKeys = new Set(keptForImages.map(contextMessageKey));
+    s.replaySuffix = handoffReplaySuffix(s);
+    s.emittedRunChars = 0;
   }
   archiveCompression({
     sessionId: sessionKey, revision: pending.revision,
@@ -751,18 +781,9 @@ async function handoffAfterCompressTool(opts: {
   });
   if (!summary) return false;
 
-  let emittedChars = 0;
-  for (const msg of s.events) {
-    if (msg?.type !== "assistant") continue;
-    for (const b of msg.message?.content ?? []) {
-      if (b?.type === "text" && b.text) emittedChars += b.text.length;
-    }
-  }
-  const dedup =
-    emittedChars > 0
-      ? `Do not repeat the ${emittedChars} characters of assistant text already emitted in the interrupted run.`
-      : "";
-  const text = [summary, COMPRESS_HANDOFF_NOTE, dedup, "Continue the task."].filter(Boolean).join("\n\n");
+  const suffix = s.replaySuffix ?? handoffReplaySuffix(s);
+  s.replaySuffix = suffix;
+  const text = [summary, COMPRESS_HANDOFF_NOTE, suffix].filter(Boolean).join("\n\n");
   const run = await send(s, text, undefined, syncTools(s, tools));
   s.startRun(run, false);
   if (!s.sentFirst) s.sentFirst = true;
@@ -998,18 +1019,9 @@ async function deliverBudgetHandoffSend(opts: {
   tools: any[];
 }): Promise<void> {
   const { s, send, tools, summary } = opts;
-  let emittedChars = 0;
-  for (const msg of s.events) {
-    if (msg?.type !== "assistant") continue;
-    for (const b of msg.message?.content ?? []) {
-      if (b?.type === "text" && b.text) emittedChars += b.text.length;
-    }
-  }
-  const dedup =
-    emittedChars > 0
-      ? `Do not repeat the ${emittedChars} characters of assistant text already emitted in the interrupted run.`
-      : "";
-  const text = [summary, COMPRESS_HANDOFF_NOTE, dedup, "Continue the task."].filter(Boolean).join("\n\n");
+  const suffix = s.replaySuffix ?? handoffReplaySuffix(s);
+  s.replaySuffix = suffix;
+  const text = [summary, COMPRESS_HANDOFF_NOTE, suffix].filter(Boolean).join("\n\n");
   const run = await send(s, text, undefined, syncTools(s, tools));
   s.startRun(run, false);
   if (!s.sentFirst) s.sentFirst = true;
@@ -1061,10 +1073,12 @@ export async function runTurn(opts: {
     if (s.replayView) {
       const view = s.replayView;
       const owners = s.replayImageKeys ?? new Set(view.messages.map((m) => coreMessageOwner(m.id)));
-      text = [renderTranscriptWithAcpView(effectiveSystem, t.messages, view.messages), COMPRESS_HANDOFF_NOTE, "Continue the task."].join("\n\n");
+      const suffix = s.replaySuffix || "Continue the task.";
+      text = [renderTranscriptWithAcpView(effectiveSystem, t.messages, view.messages), COMPRESS_HANDOFF_NOTE, suffix].filter(Boolean).join("\n\n");
       images = imagesOf(t.messages.filter((m) => owners.has(contextMessageKey(m))));
       s.replayView = undefined;
       s.replayImageKeys = undefined;
+      s.replaySuffix = undefined;
       s.sentFirst = true;
     }
     return s.agent.send(images?.length ? { text, images } : text, sendOptions);
@@ -1246,6 +1260,7 @@ export async function runTurn(opts: {
             if (b?.type === "text" && b.text) {
               reply.text(b.text);
               emitted = true;
+              s.emittedRunChars += b.text.length;
             }
           }
         }
@@ -1282,6 +1297,7 @@ export async function runTurn(opts: {
         reply.usage = runUsage(result?.usage, s.modelCalls, contextTokens());
         if (s.modelCalls === 1 && s.runCalibrates) calibrateOverhead(modelId, result?.usage, transcriptTokens());
         s.run = undefined;
+        s.emittedRunChars = 0;
         reply.finish("stop");
         s.seen.push(fingerprint(reply.message));
         if (sessionKey.startsWith(ANON_PREFIX)) dropSession(s);

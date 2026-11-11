@@ -12,6 +12,10 @@ import {
   syncMessageRefs,
 } from "../src/context/ledger.ts";
 
+import { isolateLedgerHome } from "./isolate-ledger-home.ts";
+
+isolateLedgerHome("cursor-ledger-test-");
+
 const messages = () => [
   { role: "user", content: "alpha question" },
   { role: "assistant", content: "alpha answer" },

@@ -9,6 +9,10 @@ import {
 } from "../src/context/kernel.ts";
 import { clearLedgers } from "../src/context/ledger.ts";
 
+import { isolateLedgerHome } from "./isolate-ledger-home.ts";
+
+isolateLedgerHome("cursor-kernel-test-");
+
 test("toCoreMessages maps DSH roles and text", () => {
   const cores = toCoreMessages([
     { role: "user", content: "hello" },

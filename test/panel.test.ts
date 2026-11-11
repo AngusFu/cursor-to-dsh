@@ -6,6 +6,9 @@ import { createInitialState } from "acp-kernel";
 import { renderContextPanel, renderPersistedContextPanel } from "../src/context/panel.ts";
 import { ledgerPersistenceWritable, persistKernelState } from "../src/context/ledger-persist.ts";
 import { clearKernelSessions, flushKernelState, kernelTurnPlan } from "../src/context/kernel.ts";
+import { isolateLedgerHome } from "./isolate-ledger-home.ts";
+
+isolateLedgerHome("cursor-panel-");
 
 test("renderContextPanel emits cursor-to-dsh version header", () => {
   const text = renderContextPanel({
@@ -18,8 +21,11 @@ test("renderContextPanel emits cursor-to-dsh version header", () => {
   assert.match(text, /200/);
 });
 
-test("persisted panel uses last_token_count from SQLite", () => {
-  if (!ledgerPersistenceWritable()) return;
+test("persisted panel uses last_token_count from SQLite", (t) => {
+  if (!ledgerPersistenceWritable()) {
+    t.skip("ledger SQLite is not writable");
+    return;
+  }
   clearKernelSessions();
   const sessionId = `panel-tok-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const messages = [
@@ -33,8 +39,11 @@ test("persisted panel uses last_token_count from SQLite", () => {
   assert.match(panel!, /12/);
 });
 
-test("persistKernelState stores lastTokenCount explicitly", () => {
-  if (!ledgerPersistenceWritable()) return;
+test("persistKernelState stores lastTokenCount explicitly", (t) => {
+  if (!ledgerPersistenceWritable()) {
+    t.skip("ledger SQLite is not writable");
+    return;
+  }
   clearKernelSessions();
   const sessionId = `panel-explicit-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   persistKernelState(sessionId, {

@@ -27,7 +27,7 @@ npm run live:context
 
 ## 1. 项目背景
 
-`/Users/yywl/Documents/workspace/cursor-to-dsh` 是 DSH（DeepSeek Harness）插件，
+`cursor-to-dsh` 是 DSH（DeepSeek Harness）插件，
 把 Cursor 注册为 `cursor` LLM provider 路由。**DSH 拥有 agent loop / 工具 / 权限，Cursor 只是模型。**
 
 ### 布局

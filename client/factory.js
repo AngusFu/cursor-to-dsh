@@ -358,27 +358,49 @@ window.__ModuleLoader__.load({
         const snap = byProvider[provider];
         for (const fn of subs) fn(provider, snap);
       };
+      // Control flow must stay aligned with src/usage-sync-store.ts (unit-tested).
       const fetchShared = (force, provider) => {
         const inflight = pending[provider];
         if (inflight) {
-          if (force && !inflight.force) inflight.force = true;
+          if (force && !inflight.force) {
+            const follow = { force: true, promise: null };
+            follow.promise = inflight.promise.then(
+              () => {
+                if (pending[provider] === follow) delete pending[provider];
+                return fetchShared(true, provider);
+              },
+              () => {
+                if (pending[provider] === follow) delete pending[provider];
+                return fetchShared(true, provider);
+              },
+            );
+            pending[provider] = follow;
+            return follow.promise;
+          }
           return inflight.promise;
         }
         const job = { force: Boolean(force), promise: null };
         job.promise = readUsage(job.force, provider).then(
           (next) => {
-            delete pending[provider];
+            if (pending[provider] === job) delete pending[provider];
             byProvider[provider] = next;
             notify(provider);
             return next;
           },
           (cause) => {
-            delete pending[provider];
+            if (pending[provider] === job) delete pending[provider];
             throw cause;
           },
         );
         pending[provider] = job;
         return job.promise;
+      };
+      const applyMode = (mode) => {
+        for (const key of Object.keys(byProvider)) {
+          const prev = byProvider[key];
+          byProvider[key] = { ...prev, mode };
+          notify(key);
+        }
       };
       return {
         subscribe(fn) {
@@ -389,6 +411,7 @@ window.__ModuleLoader__.load({
           return byProvider[provider];
         },
         fetch: fetchShared,
+        applyMode,
       };
     })();
 
@@ -518,12 +541,13 @@ window.__ModuleLoader__.load({
         return () => { clearInterval(timer); document.removeEventListener("visibilitychange", refresh); };
       }, [poll, load]);
 
-      /** Save the pill display mode (one POST) and adopt it into this state. */
+      /** Save the pill display mode (one POST) and write the shared store so the pill updates now. */
       const saveMode = useCallback((mode) => {
         setBusy(true);
         return writeUsageMode(mode).then(
           (next) => {
             const saved = next?.mode ?? mode;
+            usageSyncStore.applyMode(saved);
             setUsage((prev) => (prev ? { ...prev, mode: saved } : prev));
             setError(void 0);
             return saved;
@@ -534,6 +558,7 @@ window.__ModuleLoader__.load({
 
       /** Adopt a mode another state just saved, without a second POST. */
       const applyMode = useCallback((mode) => {
+        usageSyncStore.applyMode(mode);
         setUsage((prev) => (prev ? { ...prev, mode } : prev));
       }, []);
 
