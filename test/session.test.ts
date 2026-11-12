@@ -560,3 +560,62 @@ test("Cursor agent stays mcp-only (no built-in webSearch/webFetch)", async () =>
   await call(adapter, [sys("SYS"), user("hi")]);
   assert.deepEqual(cursor.created[0].tools, ["mcp"]);
 });
+
+// Regression fixtures for the 2026-11-12 Paseo conversation investigation.
+const excludedAcpTools = [
+  { name: "acp_status", description: "ACP status", parameters: { type: "object", properties: {} } },
+  { name: "compress", description: "billion-context compress", parameters: { type: "object", properties: { startId: { type: "string" } } } },
+];
+test("regression: unchanged host ACP tools do not restart an in-flight read", async () => {
+  let got: any;
+  const cursor = fakeCursor(async function* (ctx) {
+    if (String(ctx.msg).includes("[Tool results for your last tool calls.")) {
+      yield say("WRONG: restarted");
+      return;
+    }
+    got = await ctx.callTool("read", { path: "a.txt" }, "reg-read");
+    yield say("read completed on original run");
+  });
+  const adapter = adapterFor(cursor);
+  const u = user("only tell me who added these lines");
+  const options = { tools: [readTool, ...excludedAcpTools] };
+  const r1 = await call(adapter, [u], options);
+  const r2 = await call(adapter, [u, r1.assistant, toolResult("reg-read", "Alice")], options);
+  assert.equal(cursor.sends.length, 1, "a stable filtered tool set must not cause cancel+send");
+  assert.equal(r2.text, "read completed on original run");
+  assert.equal(got.content[0].text, "Alice");
+  assert.equal(cursor.created[0].local.customTools.acp_status, undefined);
+  assert.equal(cursor.created[0].local.customTools.compress, undefined);
+});
+test("regression: excluded ACP tools are not falsely announced on a new user turn", async () => {
+  const cursor = fakeCursor(async function* () { yield say("ok"); });
+  const adapter = adapterFor(cursor);
+  const u = user("first");
+  const options = { tools: [readTool, ...excludedAcpTools] };
+  const r1 = await call(adapter, [u], options);
+  await call(adapter, [u, r1.assistant, user("again")], options);
+  assert.equal(cursor.sends[1], "again", "new user input must not advertise hidden tools");
+});
+
+test("regression: real tool changes still restart once when excluded ACP tools exist", async () => {
+  const cursor = fakeCursor(async function* (ctx) {
+    if (typeof ctx.msg === "string" && ctx.msg.startsWith("[Tool results")) {
+      await ctx.callTool("x_doctor", {}, "c-x");
+      yield say("done");
+      return;
+    }
+    await ctx.callTool("read", { path: "a" }, "c-1");
+    yield say("stale run");
+  });
+  const adapter = adapterFor(cursor);
+  const u1 = user("go");
+  const r1 = await call(adapter, [u1], { tools: [readTool, ...excludedAcpTools] });
+  const res1 = toolResult("c-1", "FILE");
+  const r2 = await call(adapter, [u1, r1.assistant, res1], { tools: [readTool, xTool, ...excludedAcpTools] });
+  assert.equal(r2.calls[0]?.name, "x_doctor");
+  assert.equal(cursor.created.length, 1);
+  assert.match(cursor.sends[1], /### read \(c-1\)\nFILE[\s\S]*available: x_doctor\./);
+  const r3 = await call(adapter, [u1, r1.assistant, res1, r2.assistant, toolResult("c-x", "OK")], { tools: [readTool, xTool, ...excludedAcpTools] });
+  assert.equal(r3.text, "done");
+  assert.equal(cursor.sends.length, 2, "the follow-up run continued");
+});

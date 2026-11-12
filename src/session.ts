@@ -366,7 +366,7 @@ export function sessionKeyFor(sessionId: unknown, t: Transcript, purpose?: strin
 }
 
 function toolsKeyOf(tools: any[]): string {
-  return hash(JSON.stringify(tools.map((t) => [t?.name, t?.description ?? "", t?.parameters ?? {}])));
+  return hash(JSON.stringify(withoutBiliAcpTools(tools).map((t) => [t?.name, t?.description ?? "", t?.parameters ?? {}])));
 }
 
 /** Point the session at the current tools; returns the send options that carry them. */
@@ -424,7 +424,7 @@ function signatureOf(modelId: string, params: Param[] | undefined): string {
  * later ones (measured: the model said a tool added on the second send did not exist).
  */
 function addedToolsNote(s: CursorSession, tools: any[]): string {
-  const added = tools.map((t) => t?.name).filter((n) => n && !s.toolNames.includes(n));
+  const added = withoutBiliAcpTools(tools).map((t) => t?.name).filter((n) => n && !s.toolNames.includes(n));
   return added.length ? `[Tool update: these tools were added and are now available: ${added.join(", ")}. Look up their schemas before calling them.]` : "";
 }
 
