@@ -10,6 +10,8 @@
  * Image blocks are attachment references; the adapter loads their bytes first and passes
  * them in by attachment id. Images it could not load become a text note.
  */
+import { withoutBiliAcpTools } from "./context/bili-tools.ts";
+import { withoutRetiredContext } from "./context/route-context.ts";
 import { asObject, type Image } from "./prompt.ts";
 
 export interface Transcript {
@@ -75,7 +77,9 @@ export function readRequest(options: any, images?: Images): Transcript {
   let systemPrompt = typeof options?.system === "string" ? options.system : "";
   const messages: any[] = [];
   const toolNames = new Map<string, string>();
-  for (const m of options?.messages ?? []) {
+  for (const original of options?.messages ?? []) {
+    const m = withoutRetiredContext(original);
+    if (!m) continue;
     switch (m?.role) {
       case "system":
         systemPrompt = plainText(m.content);
@@ -102,7 +106,7 @@ export function readRequest(options: any, images?: Images): Transcript {
       }
     }
   }
-  const tools = (options?.tools ?? [])
+  const tools = withoutBiliAcpTools<any>(options?.tools ?? [])
     .filter((t: any) => t?.name)
     .map((t: any) => ({ name: t.name, description: t.description ?? "", parameters: t.parameters ?? { type: "object", properties: {} } }));
   return { systemPrompt, tools, messages };

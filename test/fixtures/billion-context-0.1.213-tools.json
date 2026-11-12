@@ -1,0 +1,197 @@
+{
+  "version": "0.1.213",
+  "source": "published dist/index.js static data expressions; no module executed",
+  "sha256": "9b3c7d020823c19722497c20ee756c78c41f8f3dafb97eecd64cb699095486d4",
+  "tools": [
+    {
+      "name": "compress",
+      "description": "Replace consumed conversation ranges with self-contained summaries you write, identified by their refs. content = ONE plain string holding ALL ranges — each block starts with its 'm00150–m00220 optional topic' header line followed by that block's summary (a valid JSON string — internal quotes \\\", newlines \\n; a JSON-encoded array as that string is also accepted for gateways that stringify arrays). Batch multiple ranges into ONE call — do not split into one call per range. Use when content is genuinely consumed.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "ONE plain string holding ALL ranges to compress — each block starts with its 'm00150–m00220 optional topic' header line followed by that block's summary markdown (a valid JSON string: internal quotes \\\" and newlines \\n; a JSON-encoded array as that string is also accepted). Batch multiple ranges into ONE call — do not split into one call per range."
+          }
+        }
+      },
+      "sourceOffset": 274140
+    },
+    {
+      "name": "decompress",
+      "description": "Restores previously compressed content. Use when you need exact details lost in compression. By default restores one tier up. Use full:true for all the way to original messages. Use toFile to write to file instead of inflating context.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "blockId": {
+            "type": "string",
+            "description": "Block ID to decompress (e.g. b5)"
+          },
+          "toFile": {
+            "type": "string",
+            "description": "Optional: write content to file instead of context"
+          },
+          "full": {
+            "type": "boolean",
+            "description": "Restore all the way to original messages"
+          }
+        },
+        "required": [
+          "blockId"
+        ]
+      },
+      "sourceOffset": 287270
+    },
+    {
+      "name": "search_context",
+      "description": "Search through compressed block summaries by keyword. Use BEFORE decompressing to find the right block.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query"
+          },
+          "limit": {
+            "type": "number",
+            "description": "Max results (default 5)"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "sourceOffset": 287430
+    },
+    {
+      "name": "acp_status",
+      "description": "Show context usage and compressible ranges. No args = overview; pass scope/view/tool/sort/limit/archiveDetail for targeted listings.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "string",
+            "description": "\"uncompressed\": history outside active blocks; \"compressed\": block ledger; omit = default overview"
+          },
+          "view": {
+            "type": "string",
+            "description": "\"messages\" for a per-message listing; \"ranges\" is the default"
+          },
+          "tool": {
+            "type": "string",
+            "description": "With view:\"messages\": only list results of this tool name"
+          },
+          "sort": {
+            "type": "string",
+            "description": "With view:\"messages\": order by \"size\", \"time\", \"tool\", or \"age\""
+          },
+          "limit": {
+            "type": "number",
+            "description": "Max entries to list"
+          },
+          "archiveDetail": {
+            "type": "boolean",
+            "description": "List pre-compaction archived blocks per-id instead of grouped by reason"
+          }
+        }
+      },
+      "sourceOffset": 287598
+    },
+    {
+      "name": "acp_cache",
+      "description": "Prompt-cache reconciliation: grand ledger (total input/cached/output, overall hit rate) with every request's miss split into new content / compression re-pay / upstream-ttl-or-client-rewrite (unattributed stable-prefix misses), plus per-fold economics (breakeven turns vs measured cadence). Defaults to a compact summary (totals + verdicts + anomalies only); pass detail=\"full\" for every fold and its line-item breakdown. Read-only. Call when asked about cache hits, cache invalidation, or what compression costs.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "detail": {
+            "type": "string",
+            "enum": [
+              "summary",
+              "full"
+            ],
+            "description": "\"summary\" (default): totals, verdicts, notable folds, anomalous requests only. \"full\": every retained fold and its line-item breakdown (most-recent window — the output states the cap)."
+          }
+        }
+      },
+      "sourceOffset": 287753
+    },
+    {
+      "name": "absorb",
+      "description": "Distill a tool result into a compact summary you write. REQUIRED immediately after a tool result ends with an [ACP absorb] instruction: pass its ref and the distilled essentials (outcome, key values, paths:lines, errors, decisions). The original output is then removed from context; your summary is the durable record. If nothing worth keeping survives, say so in the summary (e.g. '(nothing needed)') — that discards the output cleanly.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ref": {
+            "type": "string",
+            "description": "mNNNNN ref of the tool result to absorb (from the [ACP absorb] instruction)"
+          },
+          "summary": {
+            "type": "string",
+            "description": "Distilled essentials of the tool result — this replaces the original output in context"
+          }
+        },
+        "required": [
+          "ref",
+          "summary"
+        ]
+      },
+      "sourceOffset": 290185
+    },
+    {
+      "name": "acp_rule",
+      "description": "Record a short, principle-level reminder so it survives context compression — the call and its result are protected and stay in context. Record when: the user calls out or repeatedly emphasizes a lesson; the user asks you to remember or follow a behavior; you personally hit a major pitfall worth remembering long-term. Keep each rule to one short line. Omit the rule argument to list recorded rules. To remove a recorded rule pass delete with its id (e.g. \"rule3\"); to remove every recorded rule pass clear: true. delete and clear are mutually exclusive with each other and with rule — use one operation per call.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "rule": {
+            "type": "string",
+            "description": "Short principle-level reminder to record. Omit to list recorded rules."
+          },
+          "delete": {
+            "type": "string",
+            "description": "Id of a recorded rule to remove (e.g. \"rule3\"). Mutually exclusive with rule and clear."
+          },
+          "clear": {
+            "type": "boolean",
+            "description": "Remove every recorded rule at once. Mutually exclusive with rule and delete."
+          }
+        }
+      },
+      "sourceOffset": 3603058
+    },
+    {
+      "name": "acp_read_original_image",
+      "description": "Read the ORIGINAL full-resolution image of a message whose picture was downscaled before reaching you. Beside each shrunken image there is a [bili] note quoting its mNNNNN ref and both sizes — pass that ref here. The original bytes are returned as an image attached to this result. The original can be much larger than the downscaled copy, so call this only when you actually need full-resolution detail (small text, colors, pixel alignment); the downscaled version is enough for most work.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ref": {
+            "type": "string",
+            "description": "The mNNNNN message ref quoted in the [bili] downsample note beside the shrunken image."
+          }
+        },
+        "required": [
+          "ref"
+        ]
+      },
+      "sourceOffset": 3604341
+    },
+    {
+      "name": "acp_retrieve",
+      "description": "Retrieve the full original text of a stored message by its id. Large tool results are replaced on the wire with a placeholder shaped like \"📦 [acp-stored #m00423 · shell output · 4,213 tok] `npm run build`\n   → acp_retrieve(\"m00423\") returns the full text\". Call this with that ref to read the complete original back into context. Very large originals are exported to a file instead of inline text — the result then carries the exported file's path; read that file with your file-read tool. Leaving the placeholder costs nothing; retrieving costs one call — fetch only when the detail matters to the current step.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ref": {
+            "type": "string",
+            "description": "The stored message id to retrieve (an mNNNNN ref from an [acp-stored] placeholder)."
+          }
+        },
+        "required": [
+          "ref"
+        ]
+      },
+      "sourceOffset": 3605047
+    }
+  ]
+}

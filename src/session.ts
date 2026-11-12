@@ -8,16 +8,15 @@
  * - Tools changed mid-session keep the agent: every send carries the current tools, and
  *   system prompt lines that were only added are prepended to the next send. A run waiting
  *   for tool results is cancelled and continued with the new tools.
- * - Anything else that does not match what Cursor saw (compaction, edit, model or param
+ * - Anything else that does not match what Cursor saw (history replacement, edit, model or param
  *   change, rewritten system prompt, lost run) starts a new agent from the full history, so
  *   correctness never depends on the cache.
  *
- * Calls without a session id, and auxiliary calls (titles, compaction), get a session keyed
+ * Calls without a session id, and auxiliary calls (titles, host compaction), get a session keyed
  * by their opening, closed once they finish.
  */
 import { isRejectedParams, modelParams, resolveModelId, smallerContext, workingContext, type Param } from "./models.ts";
 import {
-  estimateTextTokens,
   estimateTranscript,
   fingerprint,
   hash,
@@ -25,7 +24,6 @@ import {
   incrementText,
   renderTranscript,
   systemPromptAddition,
-  textOf,
   toolResultForCursor,
   asObject,
   type Image,
@@ -34,49 +32,7 @@ import { currentTurnStart, renderTurnReplay } from "./turn-replay.ts";
 import { ERROR_CODES, Reply } from "./reply.ts";
 import type { Transcript } from "./transcript.ts";
 import { calibrateOverhead, cursorOverhead, runUsage } from "./usage.ts";
-import type { CheckpointStoreLike } from "./context/checkpoint.ts";
-import { acpWireViewForSend } from "./context/kernel.ts";
-import { incrementFromAcpView, renderTranscriptWithAcpView, type AcpWireView } from "./context/acp-wire.ts";
-import { assessContextPressure } from "./context/budget.ts";
-import { contextWindow } from "./models.ts";
-import {
-  prepareKernelCompression,
-  kernelResidentTokens,
-  kernelNudgeForTurn,
-  kernelStatus,
-  kernelTurnPlan,
-  type AcpPreserveConfig,
-} from "./context/kernel.ts";
-import { planCompaction, runHostCompaction } from "./context/compact.ts";
-import { autoTierDistillIfReady } from "./context/distill.ts";
-import { renderLiveContextPanel } from "./context/panel.ts";
-import { runPreflightSummary } from "./context/preflight.ts";
-import type { ContextManagementConfig } from "./ui-state.ts";
-import {
-  archiveCompression,
-  compressibleRefs,
-  ledgerStats,
-  refsInRange,
-  syncMessageRefs,
-} from "./context/ledger.ts";
-import { setContextFillSnapshot } from "./context/fill-cache.ts";
-import { coreMessageOwner, contextMessageKey } from "./context/message-shape.ts";
-import { COMPRESS_TOOL_NAME } from "./context/names.ts";
 import { withoutBiliAcpTools } from "./context/bili-tools.ts";
-import {
-  appendImagePlaceholders,
-  archiveSessionImages,
-  describeRestorable,
-  setImageRestoreRoot,
-} from "./context/image-restore.ts";
-import {
-  peekModelCompress,
-  rescheduleModelCompress,
-  scheduleModelCompress,
-  takeModelCompress,
-  type PendingModelCompress,
-} from "./context/pending.ts";
-import { SUMMARY_PREFIX } from "./context/summarizer.ts";
 
 const SLOTS_PER_KEY = 3;
 const IDLE_CLOSE_MS = 20 * 60_000;
@@ -111,14 +67,6 @@ class CursorSession {
   sentFirst = false;
   /** Host suffix for the unfinished user turn; not an SDK checkpoint/seen cursor. */
   turnStart?: number;
-  /** Full effective kernel view to replay after a destructive M2 rebuild. */
-  replayView?: AcpWireView;
-  /** Owner keys whose images are still live in the replay view (not folded). */
-  replayImageKeys?: Set<string>;
-  /** Handoff suffix (dedup hint + continue) kept when send() rebuilds from replayView. */
-  replaySuffix?: string;
-  /** Assistant chars already forwarded to the host in the open (possibly interrupted) run. */
-  emittedRunChars = 0;
   pending: PendingCall[] = [];
   lastCallAt = 0;
   toolsKey = "";
@@ -127,20 +75,6 @@ class CursorSession {
   systemPrompt = "";
   /** Fingerprints of the messages Cursor has seen, including its own replies. */
   seen: string[] = [];
-  /** DSH history index Cursor no longer holds verbatim; folded into `summary`. */
-  compactedAt = 0;
-  /** What replaced that history. Prepend to the next incremental send. */
-  summary = "";
-  /** Size of `summary` in estimated tokens, for the rolling budget. */
-  summaryTokens = 0;
-  /** Bumps on M3 commit or M2 rebuild after compression. */
-  generation = 0;
-  /** Last pending.revision successfully applied to the Cursor checkpoint. */
-  appliedViewRevision = 0;
-  /** Resident estimate when a growth nudge was last injected. */
-  lastNudgeResident = 0;
-  /** Hard preflight sidecar attempts since last successful compress. */
-  preflightAttempts = 0;
   busy = false;
   closed = false;
   private wakers: (() => void)[] = [];
@@ -268,18 +202,13 @@ export function cursorSessionCount(): number {
   return n;
 }
 
-/** Live Cursor sessions for a DSH session id (every signature slot). */
-export function liveCursorSessions(sessionKey: string): CursorSession[] {
-  return (SESSIONS.get(sessionKey) ?? []).filter((s) => !s.closed);
-}
-
 type Results = { call: PendingCall; message: any; extra?: string }[];
 type Plan = { kind: "fresh" } | { kind: "send"; text: string; images?: Image[] } | { kind: "results"; results: Results };
 
 const sendable = (m: any) => m?.role === "user" || m?.role === "developer";
 
 /** How the new messages map onto the live Cursor session. */
-export function planIncrement(s: CursorSession | undefined, messages: any[], acpView?: AcpWireView): Plan {
+export function planIncrement(s: CursorSession | undefined, messages: any[]): Plan {
   if (!s || s.closed || !s.sentFirst || messages.length <= s.seen.length) return { kind: "fresh" };
   if (s.seen.some((fp, i) => fingerprint(messages[i]) !== fp)) return { kind: "fresh" };
   const added = messages.slice(s.seen.length);
@@ -298,7 +227,7 @@ export function planIncrement(s: CursorSession | undefined, messages: any[], acp
     const steering = added.slice(i);
     if (!steering.every(sendable)) return { kind: "fresh" };
     const text = steering
-      .map((m) => (acpView ? incrementFromAcpView(m, acpView) : incrementText(m)))
+      .map((m) => incrementText(m))
       .filter(Boolean)
       .join("\n\n");
     if (text) results[results.length - 1].extra = `[The user sent this message while the tool was running]\n${text}`;
@@ -309,60 +238,18 @@ export function planIncrement(s: CursorSession | undefined, messages: any[], acp
   return {
     kind: "send",
     text: added
-      .map((m) => (acpView ? incrementFromAcpView(m, acpView) : incrementText(m)))
+      .map((m) => incrementText(m))
       .filter(Boolean)
       .join("\n\n"),
     images: imagesOf(added),
   };
 }
 
-function acpWireView(
-  sessionKey: string,
-  t: Transcript,
-  systemPrompt: string,
-  contextWindowTokens: number,
-  deps: CompactDeps | undefined,
-  compactedAt: number,
-): AcpWireView | undefined {
-  if (!deps || sessionKey.startsWith(ANON_PREFIX)) return undefined;
-  const tokenCount = estimateTranscript(systemPrompt, t.tools, t.messages);
-  return acpWireViewForSend(
-    sessionKey,
-    t.messages,
-    systemPrompt,
-    t.tools,
-    tokenCount,
-    contextWindowTokens,
-    deps.preserveConfig(),
-    compactedAt,
-  );
-}
-
-/**
- * Cursor checkpoint rewrite for model-initiated compression (`cursor_context_compress`).
- */
-export interface CompactDeps {
-  store: CheckpointStoreLike;
-  readBudget: () => ContextManagementConfig;
-  preserveConfig: () => { preserveRecentMessages: number; preserveRecentTokens: number };
-  resolveKeepTurns: (
-    sessionKey: string,
-    messages: readonly any[],
-    tokenCount: number,
-    contextWindowTokens: number,
-    compactedAt: number,
-  ) => number;
-  createAgent: (opts: any) => Promise<any>;
-  deleteAgent: (id: string, opts: { apiKey: string; local?: { cwd?: string } }) => Promise<void>;
-}
-
 export interface TurnDeps {
   createAgent: (opts: any) => Promise<any>;
-  /** Absent = every session behaves exactly as it did before compaction existed. */
-  compact?: CompactDeps;
 }
 
-/** Auxiliary calls (titles, compaction) carry the session id but must not touch its agent. */
+/** Auxiliary calls (titles, host compaction) carry the session id but must not touch its agent. */
 export function sessionKeyFor(sessionId: unknown, t: Transcript, purpose?: string): string {
   if (!purpose && typeof sessionId === "string" && sessionId) return sessionId;
   return ANON_PREFIX + hash(`${purpose ?? ""}\n${t.systemPrompt}\n${t.messages.length ? fingerprint(t.messages[0]) : ""}`);
@@ -451,579 +338,6 @@ async function continueWithNewTools(
   return true;
 }
 
-const COMPRESS_HANDOFF_NOTE =
-  "[Context compressed. Earlier turns are folded into the summary above. Do not repeat assistant text already emitted in the interrupted run; continue from this handoff point only.]";
-
-function interruptedEmittedChars(s: CursorSession): number {
-  let n = s.emittedRunChars;
-  for (const msg of s.events) {
-    if (msg?.type !== "assistant") continue;
-    for (const b of msg.message?.content ?? []) {
-      if (b?.type === "text" && b.text) n += b.text.length;
-    }
-  }
-  return n;
-}
-
-function handoffReplaySuffix(s: CursorSession): string {
-  const n = interruptedEmittedChars(s);
-  const dedup =
-    n > 0
-      ? `Do not repeat the ${n} characters of assistant text already emitted in the interrupted run.`
-      : "";
-  return [dedup, "Continue the task."].filter(Boolean).join("\n\n");
-}
-
-/**
- * Rewrite the Cursor checkpoint from a model-scheduled compression.
- * Returns the summary block to inject, or undefined when nothing committed.
- */
-function buildCompactionPlan(
-  sessionKey: string,
-  s: CursorSession,
-  t: Transcript,
-  pending: PendingModelCompress,
-  keepTurns: number,
-) {
-  syncMessageRefs(sessionKey, t.messages, { compactedAt: s.compactedAt });
-  let refRange: { startRef: string; endRef: string; startIndex: number; endIndex: number } | undefined;
-  if (pending.startRef && pending.endRef) {
-    const span = refsInRange(sessionKey, pending.startRef, pending.endRef);
-    if (!span?.length) return undefined;
-    refRange = {
-      startRef: pending.startRef,
-      endRef: pending.endRef,
-      startIndex: span[0]!.index,
-      endIndex: span[span.length - 1]!.index,
-    };
-  }
-  return planCompaction({
-    messages: t.messages,
-    compactedAt: s.compactedAt,
-    keepTurns,
-    previousSummary: s.summary,
-    refRange,
-  });
-}
-
-async function rebuildAgentM2(opts: {
-  s: CursorSession;
-  t: Transcript;
-  agentId: string;
-  modelId: string;
-  params: Param[] | undefined;
-  apiKey: string;
-  cwd: string;
-  deps: CompactDeps;
-}): Promise<boolean> {
-  const { s, t, agentId, modelId, params, apiKey, cwd, deps } = opts;
-  void Promise.resolve(s.agent?.getUsage?.()).catch(() => {
-    /* usage snapshot best-effort before delete */
-  });
-  try {
-    await deps.deleteAgent(agentId, { apiKey, local: { cwd } });
-  } catch (err) {
-    debug(`M2 delete failed key=${s.key.slice(0, 12)}: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
-  }
-  const { local } = syncTools(s, t.tools);
-  try {
-    s.agent = await deps.createAgent({
-      model: { id: modelId, ...(params?.length ? { params } : {}) },
-      apiKey,
-      agentId,
-      tools: ["mcp"],
-      local: { cwd, settingSources: [], customTools: local?.customTools },
-    });
-  } catch (err) {
-    debug(`M2 recreate failed key=${s.key.slice(0, 12)}: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
-  }
-  s.generation++;
-  s.sentFirst = false;
-  debug(`M2 rebuild key=${s.key.slice(0, 12)} gen=${s.generation}`);
-  return true;
-}
-
-async function commitModelCompress(opts: {
-  s: CursorSession;
-  t: Transcript;
-  sessionKey: string;
-  cwd: string;
-  deps?: CompactDeps;
-  apiKey: string;
-  modelId: string;
-  params: Param[] | undefined;
-  contextWindowTokens?: number;
-}): Promise<string | undefined> {
-  const { s, t, sessionKey, cwd, deps, apiKey, modelId, params } = opts;
-  const agentId = String(s.agent?.agentId ?? "");
-  if (!deps || s.closed || !agentId) return undefined;
-
-  const pending = takeModelCompress(sessionKey);
-  if (!pending?.summary) return undefined;
-
-  const keepTurns =
-    pending.keepTurns ||
-    deps.resolveKeepTurns(
-      sessionKey,
-      t.messages,
-      estimateTranscript(t.systemPrompt, t.tools, t.messages),
-      opts.contextWindowTokens ?? 200_000,
-      s.compactedAt,
-    );
-  const plan = buildCompactionPlan(sessionKey, s, t, pending, keepTurns);
-  if (!plan) {
-    rescheduleModelCompress(sessionKey, pending);
-    return undefined;
-  }
-
-  const preserve = deps.preserveConfig();
-  const windowTokens = opts.contextWindowTokens ?? 200_000;
-  const refs = syncMessageRefs(sessionKey, t.messages, { contextWindow: windowTokens, preserve });
-  const selected = refs.filter((r) => plan.drop.includes(t.messages[r.index]));
-  if (!selected.length) return undefined;
-  // cwd is only a read-only hint for a same-session legacy project cache; archives write under the user-level plugin store.
-  setImageRestoreRoot(sessionKey, cwd);
-  archiveSessionImages({ sessionId: sessionKey, messages: t.messages, refs, sessionRoot: cwd });
-  const foldedNotes = archiveSessionImages({
-    sessionId: sessionKey,
-    messages: t.messages,
-    refs,
-    sessionRoot: cwd,
-    onlyIndexes: new Set(selected.map((r) => r.index)),
-  });
-  const summary = appendImagePlaceholders(pending.summary, foldedNotes);
-  let staged;
-  try {
-    staged = prepareKernelCompression(sessionKey, t.messages, {
-      startRef: pending.startRef ?? selected[0]!.ref,
-      endRef: pending.endRef ?? selected[selected.length - 1]!.ref,
-      summary, topic: pending.topic, revision: pending.revision,
-    }, windowTokens, preserve);
-  } catch (err) {
-    debug(`model-compress rejected key=${s.key.slice(0, 12)}: ${err instanceof Error ? err.message : String(err)}`);
-    return undefined;
-  }
-  const dropped = refs.filter((r) => staged.newIds.has(r.fingerprint));
-  const visibleOwners = new Set(staged.view.messages.map((m) => coreMessageOwner(m.id)));
-  const droppedIndexes = new Set(dropped.map((r) => r.index));
-  const kept = t.messages.filter((m) => visibleOwners.has(contextMessageKey(m)));
-  // A compressed block may reuse a dropped message's owner id; do not treat its
-  // raw pixels as still live in the model view.
-  const keptForImages = t.messages.filter((m, i) => visibleOwners.has(contextMessageKey(m)) && !droppedIndexes.has(i));
-  let outcome;
-  let usedM2 = false;
-  try {
-    outcome = imagesOf(keptForImages)?.length ? undefined : await runHostCompaction({
-      store: deps.store, agentId, cwd, keepTurns,
-      summary, keepFrom: plan.keepFrom,
-      needles: [...dropped.map((r) => r.text), s.summary].filter(Boolean),
-      keepNeedles: [t.systemPrompt, ...kept.map(incrementText), ...staged.view.messages.filter((m) => m.contentType === "tool-call").map((m) => m.text ?? "")].filter(Boolean),
-    });
-  } catch (err) {
-    debug(`model-compress M3 error key=${s.key.slice(0, 12)}: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  // Retained images cannot be safely associated with prompt blobs by text needles.
-  if (!outcome) {
-    usedM2 = await rebuildAgentM2({ s, t, agentId, modelId, params, apiKey, cwd, deps });
-    if (!usedM2) {
-      rescheduleModelCompress(sessionKey, pending);
-      return undefined;
-    }
-  } else {
-    s.generation++;
-  }
-  try {
-    staged.commit();
-  } catch (err) {
-    // A concurrent accepted compression won. Do not publish this archive/view;
-    // the next host call must rebuild from the current kernel truth.
-    dropSession(s);
-    throw err;
-  }
-  if (usedM2) {
-    s.replayView = staged.view;
-    s.replayImageKeys = new Set(keptForImages.map(contextMessageKey));
-    s.replaySuffix = handoffReplaySuffix(s);
-    s.emittedRunChars = 0;
-  }
-  archiveCompression({
-    sessionId: sessionKey, revision: pending.revision,
-    summary, dropRefs: dropped.map((r) => r.ref),
-    dropText: [dropped.map((r) => r.text).join("\n\n"), ...foldedNotes.map((n) => n.placeholder)].filter(Boolean).join("\n\n"), topic: pending.topic,
-  });
-  const applied = kernelTurnPlan(sessionKey, t.messages, staged.view.messages.reduce((n, m) => n + estimateTextTokens(m.text ?? ""), 0), windowTokens, { preserve });
-  s.compactedAt = applied.compactedPrefix;
-  // All active summaries, not a claim that every earlier raw message is covered.
-  s.summary = staged.view.messages.filter((m) => m.text?.startsWith("[Compressed conversation section]"))
-    .map((m) => m.text).join("\n\n") || pending.summary;
-  s.summaryTokens = estimateTextTokens(s.summary);
-  s.appliedViewRevision = pending.revision;
-  s.preflightAttempts = 0;
-  s.seen = t.messages.map(fingerprint);
-  debug(
-    `model-compressed key=${s.key.slice(0, 12)} keepFrom=${s.compactedAt} summaryTokens=${s.summaryTokens} rev=${pending.revision} path=${usedM2 ? "M2" : "M3"}`,
-  );
-  if (deps && !sessionKey.startsWith(ANON_PREFIX)) {
-    void autoTierDistillIfReady({
-      sessionKey,
-      messages: t.messages,
-      tokenCount: estimateTranscript(t.systemPrompt, t.tools, t.messages),
-      contextWindowTokens: opts.contextWindowTokens ?? 200_000,
-      preserve: deps.preserveConfig(),
-      apiKey,
-      modelId,
-      params,
-      cwd,
-      deps: { createAgent: deps.createAgent, deleteAgent: deps.deleteAgent },
-    }).catch(() => {});
-  }
-  return `${SUMMARY_PREFIX}\n${s.summary}`;
-}
-
-/** Fallback when handoff did not run: prepend summary on a later idle incremental send. */
-async function applyModelCompress(opts: {
-  s: CursorSession;
-  t: Transcript;
-  sessionKey: string;
-  cwd: string;
-  deps?: CompactDeps;
-  apiKey: string;
-  modelId: string;
-  params: Param[] | undefined;
-  contextWindowTokens?: number;
-}): Promise<string> {
-  const { s } = opts;
-  if (!s.runDone) return "";
-  return (await commitModelCompress(opts)) ?? "";
-}
-
-/**
- * billion-context §7.2: after the compress tool result is delivered with its
- * batch, stop the old run, rewrite the checkpoint, and continue on a handoff send.
- */
-async function handoffAfterCompressTool(opts: {
-  s: CursorSession;
-  t: Transcript;
-  sessionKey: string;
-  cwd: string;
-  apiKey: string;
-  modelId: string;
-  params: Param[] | undefined;
-  contextWindowTokens: number;
-  deps?: CompactDeps;
-  send: (s: CursorSession, text: string, images: Image[] | undefined, options: any) => Promise<any>;
-  tools: any[];
-}): Promise<boolean> {
-  const { s, t, sessionKey, cwd, apiKey, modelId, params, contextWindowTokens, deps, send, tools } = opts;
-  if (!deps || !peekModelCompress(sessionKey)) return false;
-
-  if (s.pending.some((p) => !p.handed)) {
-    debug(`compress handoff deferred key=${s.key.slice(0, 12)}: cursor still has unhanded tool calls`);
-    return false;
-  }
-
-  const pending = peekModelCompress(sessionKey);
-  if (!pending) return false;
-  const keepTurns =
-    pending.keepTurns ||
-    deps.resolveKeepTurns(
-      sessionKey,
-      t.messages,
-      estimateTranscript(t.systemPrompt, t.tools, t.messages),
-      contextWindowTokens,
-      s.compactedAt,
-    );
-  if (!buildCompactionPlan(sessionKey, s, t, pending, keepTurns)) {
-    takeModelCompress(sessionKey);
-    debug(`compress handoff skipped key=${s.key.slice(0, 12)}: nothing to compact (keepTurns=${keepTurns})`);
-    return false;
-  }
-
-  const candidate = buildCompactionPlan(sessionKey, s, t, pending, keepTurns)!;
-  const candidateRefs = syncMessageRefs(sessionKey, t.messages, { contextWindow: contextWindowTokens, preserve: deps.preserveConfig() })
-    .filter((r) => candidate.drop.includes(t.messages[r.index]));
-  try {
-    if (!candidateRefs.length) throw new Error("no compressible refs");
-    prepareKernelCompression(sessionKey, t.messages, {
-      startRef: pending.startRef ?? candidateRefs[0]!.ref,
-      endRef: pending.endRef ?? candidateRefs[candidateRefs.length - 1]!.ref,
-      summary: pending.summary, topic: pending.topic, revision: pending.revision,
-    }, contextWindowTokens, deps.preserveConfig());
-  } catch (err) {
-    takeModelCompress(sessionKey);
-    debug(`compress handoff rejected without cancelling key=${s.key.slice(0, 12)}: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
-  }
-
-  settle(() => void Promise.resolve(s.run?.cancel?.()).catch(() => {}));
-  const deadline = Date.now() + CANCEL_WAIT_MS;
-  while (!s.runDone && Date.now() < deadline) await s.waitForChange(deadline - Date.now());
-  if (!s.runDone) {
-    debug(`compress handoff blocked key=${s.key.slice(0, 12)}: run did not stop`);
-    return false;
-  }
-
-  const summary = await commitModelCompress({
-    s,
-    t,
-    sessionKey,
-    cwd,
-    deps,
-    apiKey,
-    modelId,
-    params,
-    contextWindowTokens,
-  });
-  if (!summary) return false;
-
-  const suffix = s.replaySuffix ?? handoffReplaySuffix(s);
-  s.replaySuffix = suffix;
-  const text = [summary, COMPRESS_HANDOFF_NOTE, suffix].filter(Boolean).join("\n\n");
-  const run = await send(s, text, undefined, syncTools(s, tools));
-  s.startRun(run, false);
-  if (!s.sentFirst) s.sentFirst = true;
-  debug(`compress handoff sent key=${s.key.slice(0, 12)} chars=${text.length} gen=${s.generation}`);
-  return true;
-}
-
-/** Test hook. */
-export function batchIncludesCompress(results: Results): boolean {
-  return results.some((r) => r.call.name === COMPRESS_TOOL_NAME);
-}
-
-function publishContextFill(
-  sessionKey: string,
-  t: Transcript,
-  modelId: string,
-  contextWindowTokens: number,
-  compact: CompactDeps | undefined,
-): void {
-  if (!compact?.preserveConfig) return;
-  const snap = sessionSnapshot(sessionKey, t.messages, t.systemPrompt, t.tools, modelId, compact.preserveConfig());
-  const retained = snap.estimatedRetainedTokens ?? 0;
-  const limit = contextWindowTokens;
-  const percent = limit > 0 ? Math.min(100, Math.round((retained / limit) * 100)) : 0;
-  setContextFillSnapshot({
-    sessionId: sessionKey,
-    modelId,
-    percent,
-    retainedTokens: retained,
-    limitTokens: limit,
-    viewPending: snap.viewPending,
-    updatedAt: Date.now(),
-  });
-}
-
-/** Live Cursor session metadata for context tools. */
-export function sessionSnapshot(
-  sessionKey: string,
-  messages: any[],
-  systemPrompt: string,
-  tools: any[],
-  modelId: string,
-  preserve?: AcpPreserveConfig,
-  cwd?: string,
-) {
-  if (cwd) setImageRestoreRoot(sessionKey, cwd); // read-only legacy cwd hint
-  const s = liveCursorSessions(sessionKey)[0];
-  const pending = peekModelCompress(sessionKey);
-  const windowTokens = contextWindow({ id: modelId });
-  const retained = kernelResidentTokens(sessionKey, messages, systemPrompt, tools, windowTokens) + cursorOverhead(modelId);
-  const acpPlan =
-    s && !sessionKey.startsWith(ANON_PREFIX)
-      ? kernelTurnPlan(sessionKey, messages, retained, windowTokens, { compactedAt: s.compactedAt, preserve })
-      : undefined;
-  const keepFrom = pending?.keepTurns
-    ? Math.max(0, messages.length - pending.keepTurns)
-    : (acpPlan?.keepFromIndex ?? Math.max(0, messages.length - 5));
-  const stats = ledgerStats(sessionKey);
-  const droppable = compressibleRefs(sessionKey, s?.compactedAt ?? 0, keepFrom).map((r) => r.ref);
-  const desired = pending?.revision ?? null;
-  return {
-    generation: s?.generation ?? 0,
-    appliedViewRevision: s?.appliedViewRevision ?? 0,
-    desiredViewRevision: desired,
-    viewPending: desired !== null && desired !== (s?.appliedViewRevision ?? 0),
-    compactedAt: s?.compactedAt ?? 0,
-    previousSummary: s?.summary ?? "",
-    summaryChars: s?.summary.length ?? 0,
-    summaryTokens: s?.summaryTokens ?? 0,
-    pendingRevision: pending?.revision ?? null,
-    pendingKeepTurns: pending?.keepTurns ?? null,
-    pendingRange:
-      pending?.startRef && pending?.endRef ? { start: pending.startRef, end: pending.endRef } : null,
-    runDone: s?.runDone ?? null,
-    busy: s?.busy ?? null,
-    unhandedTools: s?.pending.filter((p) => !p.handed).map((p) => p.name) ?? [],
-    messageCount: messages.length,
-    retainedMessages: messages.length - (acpPlan?.coveredIndexes.size ?? 0),
-    compressibleRefs: droppable,
-    acpCompressibleRanges: acpPlan?.compressibleRanges ?? [],
-    acpProtectedRanges: acpPlan?.protectedRanges ?? [],
-    preserveKeepFrom: keepFrom,
-    estimatedRetainedTokens: s ? retained : null,
-    ledger: stats,
-    restorableImages: describeRestorable(sessionKey, cwd),
-    kernel: s && !sessionKey.startsWith(ANON_PREFIX) ? kernelStatus(sessionKey, windowTokens, retained, preserve) : null,
-    panel:
-      s && !sessionKey.startsWith(ANON_PREFIX)
-        ? renderLiveContextPanel({
-            sessionId: sessionKey,
-            messages,
-            systemPrompt,
-            tools,
-            modelId,
-            preserve,
-            compactedAt: s.compactedAt,
-          })
-        : null,
-  };
-}
-
-function residentTokens(s: CursorSession | undefined, t: Transcript, modelId: string, replyDraft: any[] = []): number {
-  if (!s) return estimateTranscript(t.systemPrompt, t.tools, t.messages, replyDraft) + cursorOverhead(modelId);
-  return kernelResidentTokens(s.key, t.messages, t.systemPrompt, t.tools, contextWindow({ id: modelId })) +
-    estimateTranscript("", [], [], replyDraft) + cursorOverhead(modelId);
-}
-
-function attachContextNudge(s: CursorSession | undefined, text: string, nudge: string | undefined, resident: number): string {
-  if (!nudge || !s) return text;
-  s.lastNudgeResident = resident;
-  return [nudge, text].filter(Boolean).join("\n\n");
-}
-
-/** §8 hard preflight when over budget; returns summary block, false on fatal budget error, undefined if skipped. */
-async function autoPreflightIfOverBudget(opts: {
-  s: CursorSession;
-  t: Transcript;
-  sessionKey: string;
-  cwd: string;
-  deps: CompactDeps;
-  apiKey: string;
-  modelId: string;
-  params: Param[] | undefined;
-  contextWindowTokens: number;
-  reply: Reply;
-}): Promise<string | false | undefined> {
-  const { s, t, sessionKey, deps, reply } = opts;
-  if (peekModelCompress(sessionKey)) return undefined;
-  const budgetCfg = deps.readBudget();
-  const resident = residentTokens(s, t, opts.modelId, []);
-  const pressure = assessContextPressure({
-    modelContextTokens: opts.contextWindowTokens,
-    params: opts.params,
-    modelId: opts.modelId,
-    estimatedResident: resident,
-    lastNudgeResident: s.lastNudgeResident,
-    settings: { outputReserve: budgetCfg.outputReserve, safetyMargin: budgetCfg.safetyMargin },
-  });
-  if (!pressure.overHard) return undefined;
-  if (s.preflightAttempts >= budgetCfg.preflightMaxAttempts) {
-    reply.finish(
-      "error",
-      "Cursor context budget exceeded. Call cursor_context_compress with a continuation summary or reduce history.",
-      ERROR_CODES.contextBudget,
-    );
-    return false;
-  }
-  if (!s.runDone) return undefined;
-  const keepTurns = deps.resolveKeepTurns(
-    sessionKey,
-    t.messages,
-    residentTokens(s, t, opts.modelId, []),
-    opts.contextWindowTokens,
-    s.compactedAt,
-  );
-  const plan = planCompaction({
-    messages: t.messages,
-    compactedAt: s.compactedAt,
-    keepTurns,
-    previousSummary: s.summary,
-  });
-  if (!plan?.history) return undefined;
-  const summary = await runPreflightSummary({
-    history: plan.history,
-    apiKey: opts.apiKey,
-    modelId: opts.modelId,
-    params: opts.params,
-    cwd: opts.cwd,
-    deps: { createAgent: deps.createAgent, deleteAgent: deps.deleteAgent },
-  });
-  s.preflightAttempts++;
-  if (!summary || summary.length < 32) return undefined;
-  scheduleModelCompress(sessionKey, summary, { keepTurns, topic: "preflight" });
-  debug(`preflight compress key=${s.key.slice(0, 12)} attempt=${s.preflightAttempts}`);
-  return (
-    (await commitModelCompress({
-      s,
-      t,
-      sessionKey,
-      cwd: opts.cwd,
-      deps,
-      apiKey: opts.apiKey,
-      modelId: opts.modelId,
-      params: opts.params,
-      contextWindowTokens: opts.contextWindowTokens,
-    })) ?? undefined
-  );
-}
-
-function contextPressure(
-  s: CursorSession | undefined,
-  t: Transcript,
-  modelId: string,
-  params: Param[] | undefined,
-  contextWindowTokens: number,
-  deps: CompactDeps | undefined,
-) {
-  if (!deps || !s) return undefined;
-  const budgetCfg = deps.readBudget();
-  return assessContextPressure({
-    modelContextTokens: contextWindowTokens,
-    params,
-    modelId,
-    estimatedResident: residentTokens(s, t, modelId, []),
-    lastNudgeResident: s.lastNudgeResident,
-    settings: { outputReserve: budgetCfg.outputReserve, safetyMargin: budgetCfg.safetyMargin },
-  });
-}
-
-function pickContextNudge(
-  sessionKey: string,
-  s: CursorSession,
-  t: Transcript,
-  modelId: string,
-  params: Param[] | undefined,
-  contextWindowTokens: number,
-  deps: CompactDeps,
-): string | undefined {
-  const resident = residentTokens(s, t, modelId, []);
-  const kernel = kernelNudgeForTurn(sessionKey, t.messages, resident, contextWindowTokens, deps.preserveConfig());
-  if (kernel) return kernel;
-  const pressure = contextPressure(s, t, modelId, params, contextWindowTokens, deps);
-  if (!pressure?.nudge) return undefined;
-  if (pressure.overHard || pressure.softNudge) return pressure.nudge;
-  return undefined;
-}
-
-async function deliverBudgetHandoffSend(opts: {
-  s: CursorSession;
-  t: Transcript;
-  summary: string;
-  send: (s: CursorSession, text: string, images: Image[] | undefined, options: any) => Promise<any>;
-  tools: any[];
-}): Promise<void> {
-  const { s, send, tools, summary } = opts;
-  const suffix = s.replaySuffix ?? handoffReplaySuffix(s);
-  s.replaySuffix = suffix;
-  const text = [summary, COMPRESS_HANDOFF_NOTE, suffix].filter(Boolean).join("\n\n");
-  const run = await send(s, text, undefined, syncTools(s, tools));
-  s.startRun(run, false);
-  if (!s.sentFirst) s.sentFirst = true;
-}
-
 /** Run one DSH model call on a persistent Cursor session; every chunk goes to `reply`. */
 export async function runTurn(opts: {
   model: { id: string; cursorParameters?: unknown };
@@ -1035,28 +349,13 @@ export async function runTurn(opts: {
   cwd: string;
   deps: TurnDeps;
   reply: Reply;
-  contextWindowTokens?: number;
 }): Promise<void> {
   const { model, apiKey, sessionKey, cwd, reply, signal, deps } = opts;
   const t = opts.transcript;
   const modelId = resolveModelId(model.id);
-  const contextWindowTokens = opts.contextWindowTokens ?? 200_000;
-  const budgetActive = Boolean(deps.compact) && !sessionKey.startsWith(ANON_PREFIX);
   const effectiveSystem = t.systemPrompt;
   if (!apiKey) {
     return reply.finish("error", "No Cursor API key. Store CURSOR_API_KEY in DSH credentials or export it before launching DSH.", ERROR_CODES.missingKey);
-  }
-
-  if (!sessionKey.startsWith(ANON_PREFIX)) {
-    const refs = syncMessageRefs(sessionKey, t.messages, {
-      tokenCount: estimateTranscript(t.systemPrompt, t.tools, t.messages),
-      contextWindow: contextWindowTokens,
-      compactedAt: liveCursorSessions(sessionKey)[0]?.compactedAt ?? 0,
-      preserve: deps.compact?.preserveConfig(),
-    });
-    // cwd is only a read-only hint for a same-session legacy project cache; archives write under the user-level plugin store.
-    setImageRestoreRoot(sessionKey, cwd);
-    archiveSessionImages({ sessionId: sessionKey, messages: t.messages, refs, sessionRoot: cwd });
   }
 
   let params = modelParams(model, opts.reasoning);
@@ -1069,39 +368,16 @@ export async function runTurn(opts: {
 
   const send = async (s: CursorSession, text: string, images: Image[] | undefined, sendOptions: any) => {
     signal?.throwIfAborted();
-    if (s.replayView) {
-      const view = s.replayView;
-      const owners = s.replayImageKeys ?? new Set(view.messages.map((m) => coreMessageOwner(m.id)));
-      const suffix = s.replaySuffix || "Continue the task.";
-      text = [renderTranscriptWithAcpView(effectiveSystem, t.messages, view.messages), COMPRESS_HANDOFF_NOTE, suffix].filter(Boolean).join("\n\n");
-      images = imagesOf(t.messages.filter((m) => owners.has(contextMessageKey(m))));
-      s.replayView = undefined;
-      s.replayImageKeys = undefined;
-      s.replaySuffix = undefined;
-      s.sentFirst = true;
-    }
     return s.agent.send(images?.length ? { text, images } : text, sendOptions);
   };
-  const sendFirst = async (s: CursorSession, prefix = "", acpView?: AcpWireView) => {
+  const sendFirst = async (s: CursorSession) => {
     s.sentFirst = true;
     s.turnStart = currentTurnStart(t.messages);
-    const body = acpView
-      ? renderTranscriptWithAcpView(effectiveSystem, t.messages, acpView.messages)
-      : renderTranscript(effectiveSystem, t.messages);
-    const text = [prefix, body].filter(Boolean).join("\n\n");
-    s.startRun(await send(s, text, imagesOf(t.messages.slice(s.turnStart)), {}));
+    s.startRun(await send(s, renderTranscript(effectiveSystem, t.messages), imagesOf(t.messages.slice(s.turnStart)), {}));
   };
 
   let s = (SESSIONS.get(sessionKey) ?? []).find((x) => x.signature === signature && !x.closed && !x.busy);
-  const wireView = acpWireView(
-    sessionKey,
-    t,
-    effectiveSystem,
-    contextWindowTokens,
-    deps.compact,
-    liveCursorSessions(sessionKey)[0]?.compactedAt ?? 0,
-  );
-  let plan = planIncrement(s, t.messages, wireView);
+  let plan = planIncrement(s, t.messages);
   let note = "";
   if (s && plan.kind !== "fresh") {
     const addition = systemPromptAddition(s.systemPrompt, effectiveSystem);
@@ -1129,68 +405,13 @@ export async function runTurn(opts: {
       s.systemPrompt = effectiveSystem;
       const created = Date.now();
       s.busy = true;
-      let prefix = "";
-      if (budgetActive && deps.compact) {
-        const auto = await autoPreflightIfOverBudget({
-          s,
-          t,
-          sessionKey,
-          cwd,
-          deps: deps.compact,
-          apiKey,
-          modelId,
-          params,
-          contextWindowTokens,
-          reply,
-        });
-        if (auto === false) return;
-        if (typeof auto === "string") prefix = auto;
-        else prefix = pickContextNudge(sessionKey, s, t, modelId, params, contextWindowTokens, deps.compact) ?? "";
-        if (prefix) s.lastNudgeResident = residentTokens(s, t, modelId, []);
-      }
-      await sendFirst(s, prefix, wireView);
+      await sendFirst(s);
       debug(`fresh key=${sessionKey.slice(0, 12)} create=${created - started}ms send=${Date.now() - created}ms chars=${renderTranscript(t.systemPrompt, t.messages).length} tools=${t.tools.length}`);
       freshRun = true;
     } else if (plan.kind === "send") {
       s.turnStart = s.seen.length;
       s.busy = true;
-      // Between runs only: a run in flight writes its own checkpoint when it
-      // ends and would undo the rewrite.
-      let compressed = "";
-      if (budgetActive && deps.compact) {
-        const auto = await autoPreflightIfOverBudget({
-          s,
-          t,
-          sessionKey,
-          cwd,
-          deps: deps.compact,
-          apiKey,
-          modelId,
-          params,
-          contextWindowTokens,
-          reply,
-        });
-        if (auto === false) return;
-        if (typeof auto === "string") compressed = auto;
-      }
-      if (!compressed) {
-        compressed = await applyModelCompress({
-          s,
-          t,
-          sessionKey,
-          cwd,
-          deps: deps.compact,
-          apiKey,
-          modelId,
-          params,
-          contextWindowTokens,
-        });
-      }
-      let text = [compressed, note, addedToolsNote(s, t.tools), plan.text].filter(Boolean).join("\n\n");
-      if (budgetActive && deps.compact && !compressed) {
-        const nudge = pickContextNudge(sessionKey, s, t, modelId, params, contextWindowTokens, deps.compact);
-        if (nudge) text = attachContextNudge(s, text, nudge, residentTokens(s, t, modelId, []));
-      }
+      const text = [note, addedToolsNote(s, t.tools), plan.text].filter(Boolean).join("\n\n");
       s.startRun(await send(s, text, plan.images, syncTools(s, t.tools)));
       s.systemPrompt = t.systemPrompt;
     } else if (note || s.toolsKey !== toolsKeyOf(t.tools)) {
@@ -1203,51 +424,15 @@ export async function runTurn(opts: {
         s = await openSession(sessionKey, modelId, params, t, apiKey, cwd, deps);
         s.systemPrompt = effectiveSystem;
         s.busy = true;
-        await sendFirst(s, "", wireView);
+        await sendFirst(s);
         freshRun = true;
       }
     } else {
       s.busy = true;
       s.modelCalls++;
-      const compressBatch = batchIncludesCompress(plan.results);
       for (const r of plan.results) {
         s.pending = s.pending.filter((p) => p !== r.call);
         r.call.resolve(toolResultForCursor(r.message, r.extra));
-      }
-      if (!compressBatch && budgetActive && deps.compact) {
-        const auto = await autoPreflightIfOverBudget({
-          s,
-          t,
-          sessionKey,
-          cwd,
-          deps: deps.compact,
-          apiKey,
-          modelId,
-          params,
-          contextWindowTokens,
-          reply,
-        });
-        if (auto === false) return;
-        if (typeof auto === "string") {
-          await deliverBudgetHandoffSend({ s, t, summary: auto, send, tools: t.tools });
-          s.systemPrompt = t.systemPrompt;
-        }
-      }
-      if (compressBatch) {
-        const handed = await handoffAfterCompressTool({
-          s,
-          t,
-          sessionKey,
-          cwd,
-          apiKey,
-          modelId,
-          params,
-          contextWindowTokens,
-          deps: deps.compact,
-          send,
-          tools: t.tools,
-        });
-        if (handed) s.systemPrompt = t.systemPrompt;
       }
     }
     s.touch();
@@ -1265,7 +450,6 @@ export async function runTurn(opts: {
             if (b?.type === "text" && b.text) {
               reply.text(b.text);
               emitted = true;
-              s.emittedRunChars += b.text.length;
             }
           }
         }
@@ -1303,7 +487,6 @@ export async function runTurn(opts: {
         if (s.modelCalls === 1 && s.runCalibrates) calibrateOverhead(modelId, result?.usage, transcriptTokens());
         s.run = undefined;
         s.turnStart = undefined;
-        s.emittedRunChars = 0;
         reply.finish("stop");
         s.seen.push(fingerprint(reply.message));
         if (sessionKey.startsWith(ANON_PREFIX)) dropSession(s);
@@ -1318,7 +501,7 @@ export async function runTurn(opts: {
         s = await openSession(sessionKey, modelId, lower, t, apiKey, cwd, deps);
         s.systemPrompt = effectiveSystem;
         s.busy = true;
-        await sendFirst(s, "", wireView);
+        await sendFirst(s);
         s.seen = t.messages.map(fingerprint);
         continue;
       }
@@ -1333,13 +516,6 @@ export async function runTurn(opts: {
     if (s) {
       s.busy = false;
       if (!s.closed) s.touch();
-    }
-    if (budgetActive && deps.compact) {
-      try {
-        publishContextFill(sessionKey, t, modelId, contextWindowTokens, deps.compact);
-      } catch {
-        /* snapshot is best-effort for the UI pill */
-      }
     }
     if (!reply.stopReason) {
       reply.finish("error", "Cursor turn ended without a result");

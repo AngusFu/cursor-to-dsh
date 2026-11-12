@@ -18,35 +18,6 @@ export type CursorUiConfig = KeyConfig & {
   apiKeyProfiles?: ApiKeyProfile[] | { get?: () => ApiKeyProfile[] };
   activeKeyId?: string | { get?: () => string };
   usageDisplay?: string | { get?: () => string };
-  contextManagement?: Partial<ContextManagementConfig> | { get?: () => Partial<ContextManagementConfig> };
-};
-
-/**
- * Long-session context management. Defined here rather than in `index.ts` so
- * the settings layer never has to import the plugin entry.
- */
-export interface ContextManagementConfig {
-  /** Billion-context / acp session management (compress tools, budget, standing prompt). */
-  enabled: boolean;
-  /** acp-kernel soft-protect: recent message count (billion-context default 5). */
-  preserveRecentMessages: number;
-  /** acp-kernel soft-protect: recent token tail (default 5000). */
-  preserveRecentTokens: number;
-  /** Tokens reserved for model output when computing §8 input budget. */
-  outputReserve: number;
-  /** Extra margin on top of outputReserve. */
-  safetyMargin: number;
-  /** Hard preflight attempts per session generation before CURSOR_CONTEXT_BUDGET_EXCEEDED. */
-  preflightMaxAttempts: number;
-}
-
-export const CONTEXT_DEFAULTS: ContextManagementConfig = {
-  enabled: false,
-  preserveRecentMessages: 5,
-  preserveRecentTokens: 5_000,
-  outputReserve: 8_192,
-  safetyMargin: 8_192,
-  preflightMaxAttempts: 3,
 };
 
 export type ProfileStatus = {
@@ -63,7 +34,6 @@ type Overlay = {
   activeKeyId?: string;
   apiKeyProfiles?: ApiKeyProfile[];
   usageDisplay?: UsageMode;
-  contextManagement?: ContextManagementConfig;
 };
 
 const overlay: Overlay = {};
@@ -88,7 +58,6 @@ export function applyOverlay(next: Overlay): void {
   if (next.activeKeyId !== undefined) overlay.activeKeyId = next.activeKeyId;
   if (next.apiKeyProfiles !== undefined) overlay.apiKeyProfiles = next.apiKeyProfiles;
   if (next.usageDisplay !== undefined) overlay.usageDisplay = next.usageDisplay;
-  if (next.contextManagement !== undefined) overlay.contextManagement = next.contextManagement;
 }
 
 /** Test hook. */
@@ -96,7 +65,6 @@ export function resetOverlay(): void {
   delete overlay.activeKeyId;
   delete overlay.apiKeyProfiles;
   delete overlay.usageDisplay;
-  delete overlay.contextManagement;
 }
 
 const USAGE_MODES: UsageMode[] = ["auto", "always", "off"];
@@ -121,64 +89,6 @@ export async function setUsageDisplay(
 
 export function settingsNamespace(ctx: any): string {
   return ctx?.fiber?.entry?.options?.id ?? "llm-cursor";
-}
-
-/**
- * The compaction settings as the session will see them: overlay first, then
- * whatever the profile declares, then the defaults. Every field is normalised
- * so a hand-edited YAML that dropped a key cannot produce a NaN budget.
- */
-export function readContextManagement(config: unknown): ContextManagementConfig {
-  const raw = overlay.contextManagement ?? cfgGet((config as any)?.contextManagement) ?? {};
-  const r = raw as Partial<ContextManagementConfig>;
-  const num = (key: keyof ContextManagementConfig, min: number, fallback: number) => {
-    const v = Math.floor(Number(r[key]));
-    return Number.isFinite(v) && v >= min ? v : fallback;
-  };
-  const legacyKeep = Math.floor(Number((raw as { keepTurns?: number }).keepTurns));
-  const preserveRecentMessages = Number.isFinite(legacyKeep) && legacyKeep >= 1 && r.preserveRecentMessages === undefined
-    ? legacyKeep
-    : num("preserveRecentMessages", 1, CONTEXT_DEFAULTS.preserveRecentMessages);
-  const legacyEnabled = (raw as { enabled?: unknown }).enabled;
-  const enabled =
-    typeof r.enabled === "boolean"
-      ? r.enabled
-      : typeof legacyEnabled === "boolean"
-        ? legacyEnabled
-        : CONTEXT_DEFAULTS.enabled;
-  return {
-    enabled,
-    preserveRecentMessages,
-    preserveRecentTokens: num("preserveRecentTokens", 256, CONTEXT_DEFAULTS.preserveRecentTokens),
-    outputReserve: num("outputReserve", 1024, CONTEXT_DEFAULTS.outputReserve),
-    safetyMargin: num("safetyMargin", 1024, CONTEXT_DEFAULTS.safetyMargin),
-    preflightMaxAttempts: num("preflightMaxAttempts", 1, CONTEXT_DEFAULTS.preflightMaxAttempts),
-  };
-}
-
-/** Persist a partial update; returns the merged settings afterwards. */
-export async function setContextManagement(
-  ctx: any,
-  config: CursorUiConfig | undefined,
-  patch: Partial<ContextManagementConfig>,
-): Promise<ContextManagementConfig> {
-  const current = readContextManagement(config);
-  const merged: ContextManagementConfig = {
-    enabled: typeof patch.enabled === "boolean" ? patch.enabled : current.enabled,
-    preserveRecentMessages: Math.floor(Number(patch.preserveRecentMessages ?? current.preserveRecentMessages)) || current.preserveRecentMessages,
-    preserveRecentTokens: Math.floor(Number(patch.preserveRecentTokens ?? current.preserveRecentTokens)) || current.preserveRecentTokens,
-    outputReserve: Math.floor(Number(patch.outputReserve ?? current.outputReserve)) || current.outputReserve,
-    safetyMargin: Math.floor(Number(patch.safetyMargin ?? current.safetyMargin)) || current.safetyMargin,
-    preflightMaxAttempts:
-      Math.floor(Number(patch.preflightMaxAttempts ?? current.preflightMaxAttempts)) || current.preflightMaxAttempts,
-  };
-  if (merged.preserveRecentMessages < 1) throw new Error("preserveRecentMessages must be at least 1");
-  if (merged.preserveRecentTokens < 256) throw new Error("preserveRecentTokens must be at least 256");
-  if (merged.outputReserve < 1024) throw new Error("outputReserve must be at least 1024");
-  if (merged.safetyMargin < 1024) throw new Error("safetyMargin must be at least 1024");
-  if (merged.preflightMaxAttempts < 1) throw new Error("preflightMaxAttempts must be at least 1");
-  await persistConfig(ctx, { contextManagement: merged });
-  return readContextManagement(config);
 }
 
 async function persistConfig(ctx: any, patch: Record<string, unknown>): Promise<void> {
@@ -332,34 +242,11 @@ export async function useProfile(ctx: any, config: CursorUiConfig | undefined, i
   return listProfileStatus(ctx, { ...config, activeKeyId: id });
 }
 
-/** Drop legacy contextManagement keys from persisted settings (keepTurns, enabled, …). */
-export async function migrateLegacyContextSettings(ctx: any, config: CursorUiConfig | undefined): Promise<boolean> {
-  const settings = ctx?.get?.("settings");
-  if (!settings?.read) return false;
-  const ns = settingsNamespace(ctx);
-  let doc: any;
-  try {
-    doc = await settings.read(ns);
-  } catch {
-    return false;
-  }
-  const raw = doc?.contextManagement;
-  if (!raw || typeof raw !== "object") return false;
-  const legacy = "keepTurns" in raw || "budgetTokens" in raw || "summarizerProvider" in raw || "summarizerModel" in raw;
-  if (!legacy) return false;
-  const { keepTurns: _k, budgetTokens: _b, summarizerProvider: _p, summarizerModel: _m, ...rest } = raw as Record<string, unknown>;
-  await persistConfig(ctx, {
-    contextManagement: readContextManagement({ ...(config as object), contextManagement: rest }),
-  });
-  return true;
-}
-
 export function uiSnapshot(ctx: any, config: CursorUiConfig | undefined) {
   return (async () => ({
     activeKeyId: readActiveKeyId(config),
     profiles: await listProfileStatus(ctx, config),
     usageDisplay: readUsageDisplay(config),
-    contextManagement: readContextManagement(config),
     settingsNs: settingsNamespace(ctx),
   }))();
 }

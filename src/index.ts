@@ -11,32 +11,20 @@ import Schema from "@deepseek-ai/schemastery";
 
 import { CursorAdapter } from "./adapter.ts";
 import { registerCopilotAuth } from "./copilot-auth.ts";
-import { registerContextCommands } from "./context/commands.ts";
 import { registerCursorCommands } from "./commands.ts";
 import { cfgString } from "./config-value.ts";
 import { registerHostApi } from "./host-api.ts";
-import { registerAcpContextPrompt } from "./context/system-prompt.ts";
-import { registerContextTools } from "./context/tools.ts";
 import { type ApiKeyProfile, type KeyConfig, resolveActiveApiKey } from "./keys.ts";
 import { PROVIDER_ID, setContextPreference } from "./models.ts";
-import { createCursorAgent, deleteCursorAgent, listCursorModels, prewarmCursor } from "./sdk.ts";
-import { kernelTurnPlan } from "./context/kernel.ts";
-import { readRequest } from "./transcript.ts";
-import { estimateTranscript } from "./prompt.ts";
-import { contextWindow, resolveModelId } from "./models.ts";
-import { closeAllCursorSessions, debug, sessionSnapshot, type CompactDeps } from "./session.ts";
+import { createCursorAgent, listCursorModels, prewarmCursor } from "./sdk.ts";
+import { closeAllCursorSessions, debug } from "./session.ts";
 import {
-  migrateLegacyContextSettings,
   readActiveKeyId,
-  readContextManagement,
   readProfiles,
-  type ContextManagementConfig,
   type CursorUiConfig,
 } from "./ui-state.ts";
-export type { ContextManagementConfig } from "./ui-state.ts";
-import type { CheckpointStoreLike } from "./context/checkpoint.ts";
 export const name = "cursor-to-dsh";
-export const inject = ["llm", "tools", "systemPrompt", "commands"];
+export const inject = ["llm", "commands"];
 
 export interface Config {
   /** Volatile so the settings service gives this plugin a namespace and the Models page lists Cursor. */
@@ -48,8 +36,6 @@ export interface Config {
   activeKeyId?: string | Volatile<string>;
   /** Usage pill visibility: auto (only Cursor models), always, off. */
   usageDisplay?: string | Volatile<string>;
-  /** acp-kernel preserve zone + §8 budget (billion-context alignment). */
-  contextManagement?: ContextManagementConfig;
 }
 
 const ApiKeyProfileSchema = Schema.object({
@@ -70,44 +56,10 @@ export const Config: Schema<Config> = Schema.object({
   apiKey: Schema.string().role("secret").description("Legacy inline Cursor API key; prefer Settings → Cursor."),
   context: Schema.string().default("min").description("Cursor context tier: min, max, or an offered value such as 300k."),
   cwd: Schema.string().description("Cursor agent working directory; default is the session's directory."),
-  contextManagement: Schema.object({
-    enabled: Schema.boolean()
-      .default(false)
-      .description("Billion-context / acp session management. Off = plain Cursor route only (no compress tools, budget, or [acp-context] prompt)."),
-    preserveRecentMessages: Schema.number()
-      .default(5)
-      .description("acp-kernel: count of recent messages kept verbatim (billion-context default)."),
-    preserveRecentTokens: Schema.number()
-      .default(5_000)
-      .description("acp-kernel: recent token tail kept verbatim."),
-    outputReserve: Schema.number()
-      .default(8_192)
-      .description("Tokens reserved for output when computing §8 input budget."),
-    safetyMargin: Schema.number()
-      .default(8_192)
-      .description("Extra margin subtracted from effective context window."),
-    preflightMaxAttempts: Schema.number()
-      .default(3)
-      .description("Hard preflight sidecar attempts per generation before budget error."),
-  })
-  .default({
-    enabled: false,
-    preserveRecentMessages: 5,
-    preserveRecentTokens: 5_000,
-    outputReserve: 8_192,
-    safetyMargin: 8_192,
-    preflightMaxAttempts: 3,
-  })
-    .description("acp-kernel preserve zone + §8 budget. Compress ranges come from refs in status, not keepTurns.")
-    // Volatile so Settings can edit it live: the session reads it through
-    // cfgGet() every turn, and dsh-settings refuses to write non-volatile paths.
-    .volatile(),
 }) as any;
 
 export function apply(ctx: Context, config: Config): void {
   const getConfig = (): CursorUiConfig => config as CursorUiConfig;
-
-  const contextEnabled = () => readContextManagement(getConfig()).enabled;
 
   setContextPreference(cfgString(config?.context, "min"));
 
@@ -166,31 +118,6 @@ export function apply(ctx: Context, config: Config): void {
     ? undefined
     : (opts: { apiKey: string; modelId: string }) => void prewarmCursor(opts);
 
-  /** Model-initiated checkpoint rewrite (cursor_context_compress → M3/M2 handoff). */
-  let platform: Promise<any> | undefined;
-  const getPlatform = (): Promise<any> =>
-    (platform ??= import("@cursor/sdk").then((sdk) => sdk.createAgentPlatform()));
-  const checkpointStore: CheckpointStoreLike = {
-    loadLatest: (agentId) => getPlatform().then((p) => p.checkpointStore.loadLatest(agentId)),
-    saveCheckpoint: (agentId, checkpoint) =>
-      getPlatform().then((p) => p.checkpointStore.saveCheckpoint(agentId, checkpoint)),
-  };
-
-  const management = () => readContextManagement(config);
-  const preserveConfig = () => {
-    const m = management();
-    return { preserveRecentMessages: m.preserveRecentMessages, preserveRecentTokens: m.preserveRecentTokens };
-  };
-  const compact: CompactDeps = {
-    store: checkpointStore,
-    readBudget: management,
-    resolveKeepTurns: (sessionKey, messages, tokenCount, windowTokens, compactedAt) =>
-      kernelTurnPlan(sessionKey, messages, tokenCount, windowTokens, { compactedAt, preserve: preserveConfig() }).keepTurns,
-    preserveConfig,
-    createAgent: createCursorAgent,
-    deleteAgent: deleteCursorAgent,
-  };
-
   const adapter = new CursorAdapter({
     createAgent: createCursorAgent,
     listModels: listCursorModels,
@@ -198,8 +125,6 @@ export function apply(ctx: Context, config: Config): void {
     cwdFor,
     readImage,
     prewarm,
-    contextEnabled,
-    compact,
   });
   (ctx as any).llm.registerConfigurableProviders([
     { provider: PROVIDER_ID, displayName: "Cursor", settingsNs: (ctx as any).fiber?.entry?.options.id ?? name, settingsPath: [] },
@@ -244,54 +169,7 @@ export function apply(ctx: Context, config: Config): void {
     return out;
   };
 
-  ctx.effect(() => {
-    void migrateLegacyContextSettings(ctx, getConfig()).catch(() => {});
-    return () => {};
-  }, "cursor-to-dsh: context settings migration");
-
   registerHostApi(ctx, getConfig, resolveApiKey, readCopilotTokens);
   registerCopilotAuth(ctx);
   registerCursorCommands(ctx, getConfig);
-  const contextToolDeps = {
-    contextEnabled,
-    preserveConfig,
-    contextWindowForModel: (modelId: string) => contextWindow({ id: resolveModelId(modelId) }),
-    cwdFor,
-    sessionSnapshot: (sessionId: string, session: any, modelId: string) => {
-      if (!session?.deriveMessages) return sessionSnapshot(sessionId, [], "", [], modelId, undefined, cwdFor(sessionId));
-      const { messages, systemPrompt } = readRequest({ messages: Array.from(session.deriveMessages() ?? []) });
-      const route = session.requestContext?.();
-      return {
-        provider: route?.provider ?? "unknown",
-        ...sessionSnapshot(sessionId, messages, systemPrompt, [], modelId, preserveConfig(), cwdFor(sessionId)),
-      };
-    },
-  };
-
-  ctx.effect(() => {
-    let disposeTools: (() => void) | undefined;
-    let disposeCommands: (() => void) | undefined;
-    let disposeAcpPrompt: (() => void) | undefined;
-    const syncContextSurface = () => {
-      disposeTools?.();
-      disposeCommands?.();
-      disposeAcpPrompt?.();
-      disposeTools = undefined;
-      disposeCommands = undefined;
-      disposeAcpPrompt = undefined;
-      if (!contextEnabled()) return;
-      disposeAcpPrompt = registerAcpContextPrompt(ctx);
-      disposeTools = registerContextTools(ctx, contextToolDeps);
-      disposeCommands = registerContextCommands(ctx, { preserveConfig });
-    };
-    syncContextSurface();
-    const onVolatile = () => syncContextSurface();
-    (ctx as any).on?.("loader/volatile-update", onVolatile);
-    return () => {
-      (ctx as any).off?.("loader/volatile-update", onVolatile);
-      disposeTools?.();
-      disposeCommands?.();
-      disposeAcpPrompt?.();
-    };
-  }, "cursor-to-dsh: context surface");
 }

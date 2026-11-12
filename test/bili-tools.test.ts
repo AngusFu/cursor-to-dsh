@@ -2,12 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { isBiliAcpTool, withoutBiliAcpTools } from "../src/context/bili-tools.ts";
-import { COMPRESS_TOOL_NAME, DECOMPRESS_TOOL_NAME } from "../src/context/names.ts";
-import { isolateLedgerHome } from "./isolate-ledger-home.ts";
+const COMPRESS_TOOL_NAME = "cursor_context_compress";
+const DECOMPRESS_TOOL_NAME = "cursor_context_decompress";
 import { fakeCursor, adapterFor, say, sys, user } from "./session-harness.ts";
 import { closeAllCursorSessions } from "../src/session.ts";
 
-isolateLedgerHome("cursor-bili-tools-");
 
 const biliCompress = {
   name: "compress",
@@ -32,19 +31,19 @@ const zipCompress = {
   parameters: { type: "object", properties: { files: { type: "array" }, format: { type: "string" } } },
 };
 
-test("isBiliAcpTool matches unique ACP names and fingerprinted generic names only", () => {
+test("isBiliAcpTool matches reserved ACP/retired names and fingerprinted generic names only", () => {
   assert.equal(isBiliAcpTool(biliCompress), true);
   assert.equal(isBiliAcpTool(biliDecompress), true);
   assert.equal(isBiliAcpTool({ name: "search_context", description: "search" }), true);
   assert.equal(isBiliAcpTool({ name: "acp_status" }), true);
   assert.equal(isBiliAcpTool({ name: "acp_cache" }), true);
   assert.equal(isBiliAcpTool(zipCompress), false);
-  assert.equal(isBiliAcpTool({ name: COMPRESS_TOOL_NAME, description: "compress", parameters: { type: "object", properties: { summary: { type: "string" } } } }), false);
-  assert.equal(isBiliAcpTool({ name: DECOMPRESS_TOOL_NAME, parameters: { type: "object", properties: { imageRef: { type: "string" } } } }), false);
+  assert.equal(isBiliAcpTool({ name: COMPRESS_TOOL_NAME, description: "compress", parameters: { type: "object", properties: { summary: { type: "string" } } } }), true);
+  assert.equal(isBiliAcpTool({ name: DECOMPRESS_TOOL_NAME, parameters: { type: "object", properties: { imageRef: { type: "string" } } } }), true);
   assert.equal(isBiliAcpTool({ name: "read_file" }), false);
 });
 
-test("withoutBiliAcpTools keeps cursor_context_* and unrelated compress, drops bili tools", () => {
+test("withoutBiliAcpTools keeps unrelated compress, drops retired local and global bili tools", () => {
   const kept = withoutBiliAcpTools([
     { name: COMPRESS_TOOL_NAME, description: "compress" },
     biliCompress,
@@ -54,12 +53,12 @@ test("withoutBiliAcpTools keeps cursor_context_* and unrelated compress, drops b
   ]);
   assert.deepEqual(
     kept.map((t) => t.name),
-    [COMPRESS_TOOL_NAME, "compress", "read_file"],
+    ["compress", "read_file"],
   );
-  assert.equal(kept[1], zipCompress);
+  assert.equal(kept[0], zipCompress);
 });
 
-test("Cursor createAgent customTools omit bili ACP tools and keep the Cursor-route set", async () => {
+test("Cursor createAgent customTools omit bili ACP and retired local tools, retaining normal DSH tools", async () => {
   closeAllCursorSessions();
   const cursor = fakeCursor(async function* () {
     yield say("ok");
@@ -83,7 +82,7 @@ test("Cursor createAgent customTools omit bili ACP tools and keep the Cursor-rou
     chunks.push(chunk);
   }
   const custom = cursor.created[0]?.local?.customTools ?? {};
-  assert.ok(custom[COMPRESS_TOOL_NAME], "cursor_context_compress stays on the Cursor route");
+  assert.equal(custom[COMPRESS_TOOL_NAME], undefined, "retired local compress tool cannot reach Cursor");
   assert.ok(custom.read_file, "unrelated host tools stay");
   assert.ok(custom.compress, "unrelated compress (zip) stays");
   assert.equal(custom.search_context, undefined, "search_context must not reach Cursor");

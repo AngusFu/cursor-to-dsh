@@ -8,15 +8,10 @@ import {
   readUsageDisplay,
   removeProfile,
   setProfileKey,
-  setContextManagement,
   setUsageDisplay,
   uiSnapshot,
   useProfile,
 } from "./ui-state.ts";
-import { getContextFillSnapshot } from "./context/fill-cache.ts";
-import { renderPersistedContextPanel } from "./context/panel.ts";
-import { ledgerPersistenceEnabled, listPersistedContextSessions } from "./context/ledger-persist.ts";
-import { contextWindow, resolveModelId } from "./models.ts";
 import { fetchCursorUsage } from "./quota-cursor.ts";
 import { fetchCopilotUsage } from "./quota-copilot.ts";
 
@@ -150,80 +145,6 @@ export function registerHostApi(
             const body = await readJson(request);
             const mode = await setUsageDisplay(ctx, getConfig(), String(body.mode ?? ""));
             return { mode };
-          }),
-        }),
-        cctx.connection.fetch.register({
-          path: `${API_ROOT}/context`,
-          methods: ["POST"],
-          requestBody: "buffered",
-          fetch: fetchAction(async (request) => {
-            const body = await readJson(request);
-            const patch: Partial<{
-              enabled: boolean;
-              preserveRecentMessages: number;
-              preserveRecentTokens: number;
-              outputReserve: number;
-              safetyMargin: number;
-              preflightMaxAttempts: number;
-            }> = {};
-            if (body.enabled !== undefined) patch.enabled = Boolean(body.enabled);
-            if (body.preserveRecentMessages !== undefined) patch.preserveRecentMessages = Number(body.preserveRecentMessages);
-            if (body.preserveRecentTokens !== undefined) patch.preserveRecentTokens = Number(body.preserveRecentTokens);
-            // Legacy Settings clients may still send keepTurns → map to preserveRecentMessages.
-            if (body.keepTurns !== undefined && body.preserveRecentMessages === undefined) {
-              patch.preserveRecentMessages = Number(body.keepTurns);
-            }
-            if (body.outputReserve !== undefined) patch.outputReserve = Number(body.outputReserve);
-            if (body.safetyMargin !== undefined) patch.safetyMargin = Number(body.safetyMargin);
-            if (body.preflightMaxAttempts !== undefined) patch.preflightMaxAttempts = Number(body.preflightMaxAttempts);
-            await setContextManagement(ctx, getConfig(), patch);
-            return uiSnapshot(ctx, getConfig());
-          }),
-        }),
-        cctx.connection.fetch.register({
-          path: `${API_ROOT}/context/panel-sessions`,
-          methods: ["GET"],
-          requestBody: "buffered",
-          fetch: fetchAction(async () => ({
-            sqlite: ledgerPersistenceEnabled(),
-            sessions: listPersistedContextSessions(),
-            slash: "/cursor-acp-panel",
-            tool: "cursor_context_status",
-          })),
-        }),
-        cctx.connection.fetch.register({
-          path: `${API_ROOT}/context/panel`,
-          methods: ["GET"],
-          requestBody: "buffered",
-          fetch: fetchAction(async (request) => {
-            const url = new URL(request.url);
-            const sessionId = url.searchParams.get("sessionId")?.trim() ?? "";
-            if (!sessionId) {
-              return {
-                error: "sessionId query required",
-                sessions: listPersistedContextSessions(12),
-              };
-            }
-            const modelId = url.searchParams.get("modelId")?.trim() || "default";
-            const limit = contextWindow({ id: resolveModelId(modelId) });
-            const panel = renderPersistedContextPanel(sessionId, limit);
-            if (!panel) {
-              return { error: "No persisted kernel state for this session", sessionId };
-            }
-            return { sessionId, panel, persisted: true, modelContextLimit: limit };
-          }),
-        }),
-        cctx.connection.fetch.register({
-          path: `${API_ROOT}/context/fill`,
-          methods: ["GET"],
-          requestBody: "buffered",
-          fetch: fetchAction(async (request) => {
-            const url = new URL(request.url);
-            const sessionId = url.searchParams.get("sessionId")?.trim() ?? "";
-            if (!sessionId) return { error: "sessionId query required" };
-            const snap = getContextFillSnapshot(sessionId);
-            if (!snap) return { error: "no live reading yet", sessionId };
-            return snap;
           }),
         }),
       ];
