@@ -345,7 +345,7 @@ export function registerContextTools(ctx: Context, deps: ContextToolsDeps): (() 
           const restored = resolveImageRestore({
             sessionId,
             imageRef: mode.ref,
-            sessionRoot: deps.cwdFor?.(sessionId),
+            sessionRoot: deps.cwdFor?.(sessionId), // legacy same-session project cache only; writes ignore cwd
           });
           if (!restored.ok) throw new Error(restored.text);
           return {

@@ -583,6 +583,7 @@ async function commitModelCompress(opts: {
   const refs = syncMessageRefs(sessionKey, t.messages, { contextWindow: windowTokens, preserve });
   const selected = refs.filter((r) => plan.drop.includes(t.messages[r.index]));
   if (!selected.length) return undefined;
+  // cwd is only a read-only hint for a same-session legacy project cache; archives write under the user-level plugin store.
   setImageRestoreRoot(sessionKey, cwd);
   archiveSessionImages({ sessionId: sessionKey, messages: t.messages, refs, sessionRoot: cwd });
   const foldedNotes = archiveSessionImages({
@@ -825,7 +826,7 @@ export function sessionSnapshot(
   preserve?: AcpPreserveConfig,
   cwd?: string,
 ) {
-  if (cwd) setImageRestoreRoot(sessionKey, cwd);
+  if (cwd) setImageRestoreRoot(sessionKey, cwd); // read-only legacy cwd hint
   const s = liveCursorSessions(sessionKey)[0];
   const pending = peekModelCompress(sessionKey);
   const windowTokens = contextWindow({ id: modelId });
@@ -1053,6 +1054,7 @@ export async function runTurn(opts: {
       compactedAt: liveCursorSessions(sessionKey)[0]?.compactedAt ?? 0,
       preserve: deps.compact?.preserveConfig(),
     });
+    // cwd is only a read-only hint for a same-session legacy project cache; archives write under the user-level plugin store.
     setImageRestoreRoot(sessionKey, cwd);
     archiveSessionImages({ sessionId: sessionKey, messages: t.messages, refs, sessionRoot: cwd });
   }

@@ -27,11 +27,16 @@ const GIF = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 const pngImg: RestorableImage = { mediaType: "image/png", b64: PNG, bytes: Buffer.byteLength(PNG, "base64"), width: 1, height: 1 };
 
 const previousHome = process.env.HOME;
+const previousDshHome = process.env.DSH_HOME;
 
 function tempRoot(label: string): string {
   const root = mkdtempSync(join(tmpdir(), `cursor-img-${label}-`));
-  process.env.HOME = root;
-  return root;
+  process.env.HOME = join(root, "home");
+  const project = join(root, "project");
+  mkdirSync(process.env.HOME);
+  mkdirSync(project);
+  delete process.env.DSH_HOME;
+  return project;
 }
 
 afterEach(() => {
@@ -40,6 +45,8 @@ afterEach(() => {
   resetLedgerDb();
   if (previousHome === undefined) delete process.env.HOME;
   else process.env.HOME = previousHome;
+  if (previousDshHome === undefined) delete process.env.DSH_HOME;
+  else process.env.DSH_HOME = previousDshHome;
 });
 
 function userWithImage(data: string, mimeType = "image/png", text = "see this") {
@@ -121,8 +128,8 @@ test("cross-session isolation: same ref number never shares a directory or pixel
   const gif: RestorableImage = { mediaType: "image/gif", b64: GIF, bytes: Buffer.byteLength(GIF, "base64") };
   const pb = writeRestoredImage("m00001", 0, gif, "conv-beta", root)!;
   assert.notEqual(pa, pb);
-  assert.ok(pa.includes(join("retrieve", "img", "conv-alpha")));
-  assert.ok(pb.includes(join("retrieve", "img", "conv-beta")));
+  assert.ok(pa.includes(join("cursor-to-dsh", "retrieve", "img", "conv-alpha")));
+  assert.ok(pb.includes(join("cursor-to-dsh", "retrieve", "img", "conv-beta")));
   assert.equal(pathWithinRoot(restoreExportDir("conv-alpha", root), pb), undefined);
   assert.deepEqual(readFileSync(pa), Buffer.from(PNG, "base64"));
   assert.deepEqual(readFileSync(pb), Buffer.from(GIF, "base64"));

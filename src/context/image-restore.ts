@@ -3,29 +3,48 @@
  *
  * billion-context can rebuild its index from inbound HTTP history each turn.
  * cursor-to-dsh uses the Cursor SDK + checkpoint, so bytes must be spilled
- * when the session still has them. This module writes under a session-scoped
- * directory (session cwd/.dsh/retrieve/img/<session> or ~/.dsh/retrieve/img/<session>),
- * never a new database. Only payloads we can actually decode are restorable.
+ * when the session still has them. Writes go only to the user-level plugin
+ * store: `$DSH_HOME/cursor-to-dsh/retrieve/img/<session>` (default
+ * `~/.dsh/cursor-to-dsh/retrieve/img/<session>`). That follows the host's
+ * DSH home convention and is isolated by native session id, never by cwd.
+ * Only real descendants of the canonical OS user home are writable; custom
+ * external homes, descendant symlinks, and observed project roots fail closed.
+ * This module never falls back to a project or `cwd/.dsh` for writes.
+ *
+ * Older `cwd/.dsh/retrieve/img/<session>` trees are left in place and are
+ * never deleted, rewritten, or bulk-imported. The same session may read
+ * them after a strict ownership check. Other sessions are not scanned.
+ * External storage is not a sandbox: a model can still read shared workspace
+ * files with ordinary tools.
+ *
+ * Only payloads we can actually decode are restorable.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
+  closeSync,
+  constants,
   existsSync,
+  fsyncSync,
+  lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmdirSync,
   statSync,
   unlinkSync,
-  writeFileSync,
+  writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const IMAGE_PLACEHOLDER = "[image]";
 const DEFAULT_TTL_MS = 7 * 24 * 3600 * 1000;
 const INDEX_NAME = "index.json";
 const LIST_CAP = 50;
+const PLUGIN_STORE_SEGMENTS = ["cursor-to-dsh", "retrieve", "img"] as const;
 
 export interface RestorableImage {
   mediaType: string;
@@ -41,6 +60,8 @@ export interface IndexedImage {
   width?: number;
   height?: number;
   path: string;
+  /** Zero-based position among images that share this ref; preserved across rebuilds. */
+  index?: number;
 }
 
 export interface ImageNote {
@@ -57,25 +78,58 @@ export interface ImageRestoreResult {
   text: string;
 }
 
-const ROOTS = new Map<string, string>();
-const INDEX = new Map<string, Map<string, IndexedImage[]>>();
+/** Optional cwd hints used only to locate a same-session legacy project cache. */
+const LEGACY_CWD = new Map<string, string>();
+// Canonical project roots ever observed in this process. A later cwd change must
+// not make an earlier project's path eligible for cache writes or TTL deletes.
+const PROJECT_ROOTS = new Set<string>();
 
+/**
+ * Record a session cwd as a read-only hint for a pre-existing project cache.
+ * This never selects the write location.
+ */
 export function setImageRestoreRoot(sessionId: string, root: string): void {
   const resolved = resolveSafeRoot(root);
-  if (resolved) ROOTS.set(sessionId, resolved);
+  if (resolved) {
+    LEGACY_CWD.set(sessionId, resolved);
+    PROJECT_ROOTS.add(resolved);
+  }
 }
 
-export function imageRestoreRoot(sessionId: string, sessionRoot?: string): string {
-  return sessionRoot?.trim() ? resolveSafeRoot(sessionRoot) ?? defaultStateRoot() : ROOTS.get(sessionId) ?? defaultStateRoot();
+/** User-level plugin image store root (`$DSH_HOME/cursor-to-dsh/retrieve/img`). The arguments are ignored and kept only for call-site compatibility. */
+export function imageRestoreRoot(_sessionId?: string, _sessionRoot?: string): string {
+  return pluginImageStoreRoot();
 }
 
 export function resetImageRestoreForTests(): void {
-  ROOTS.clear();
-  INDEX.clear();
+  LEGACY_CWD.clear();
+  PROJECT_ROOTS.clear();
 }
 
-function defaultStateRoot(): string {
-  return resolve(join(homedir(), ".dsh"));
+/**
+ * Resolve the host user-data home the same way DSH does: a non-empty
+ * `$DSH_HOME`, otherwise `~/.dsh`. Whitespace-only and cwd-relative values
+ * are treated as unset. This computes the candidate only: guardedStoreRoot
+ * separately restricts filesystem access to real user-home descendants.
+ */
+export function resolveDshHome(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = env.DSH_HOME?.trim();
+  if (raw) {
+    const expanded = expandHomePath(raw);
+    if (isAbsolute(expanded)) return canonicalHomePath(resolve(expanded));
+  }
+  return canonicalHomePath(resolve(join(homedir(), ".dsh")));
+}
+
+function expandHomePath(value: string): string {
+  if (value === "~") return homedir();
+  if (value.startsWith("~" + sep) || value.startsWith("~/")) return join(homedir(), value.slice(2));
+  return value;
+}
+
+/** Canonical write root for this plugin's image backups, session buckets live underneath. */
+export function pluginImageStoreRoot(env: NodeJS.ProcessEnv = process.env): string {
+  return join(resolveDshHome(env), ...PLUGIN_STORE_SEGMENTS);
 }
 
 function resolveSafeRoot(root: string): string | undefined {
@@ -97,14 +151,21 @@ export function restoreExportDirName(sessionId: string): string {
     : `${safe || "session"}-${createHash("sha256").update(sessionId).digest("hex").slice(0, 8)}`;
 }
 
-export function restoreExportDir(sessionId: string, sessionRoot?: string): string {
-  const root = imageRestoreRoot(sessionId, sessionRoot);
-  const name = restoreExportDirName(sessionId);
-  return samePath(root, defaultStateRoot()) ? join(root, "retrieve", "img", name) : join(root, ".dsh", "retrieve", "img", name);
+/** Writable, session-scoped export directory under the plugin store. `sessionRoot` is ignored. */
+export function restoreExportDir(sessionId: string, _sessionRoot?: string): string {
+  return join(pluginImageStoreRoot(), restoreExportDirName(sessionId));
 }
 
 function samePath(a: string, b: string): boolean {
   return resolve(a) === resolve(b);
+}
+
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
 /** Return the resolved path when it stays inside root; otherwise undefined. */
@@ -123,12 +184,178 @@ export function pathWithinRoot(root: string, target: string): string | undefined
 }
 
 function existingPathWithin(root: string, target: string): string | undefined {
-  const within = pathWithinRoot(root, target);
-  if (!within || !existsSync(within)) return undefined;
+  // Read-only legacy references can use OS ancestor aliases (/var vs /private/var).
+  // Compare their real locations, still rejecting final symlinks and foreign buckets.
+  if (!existsSync(target) || isSymlink(target) || isSymlink(root)) return undefined;
   try {
-    const realFile = realpathSync(within);
-    const realRoot = existsSync(root) ? realpathSync(root) : resolve(root);
+    const realFile = realpathSync(target);
+    const realRoot = realpathSync(root);
     return pathWithinRoot(realRoot, realFile);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Canonicalize the trusted OS home/its system ancestors, not user-controlled children. */
+function trustedHome(): string | undefined {
+  const home = homedir();
+  if (!isAbsolute(home)) return undefined;
+  try {
+    const real = realpathSync(home);
+    return statSync(real).isDirectory() ? real : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Accept both lexical HOME and canonical HOME spellings (e.g. macOS /var -> /private/var). */
+function canonicalHomePath(target: string): string {
+  const home = trustedHome();
+  const lexicalHome = resolve(homedir());
+  if (home && pathWithinRoot(lexicalHome, target)) return join(home, relative(lexicalHome, target));
+  return target;
+}
+
+function insideKnownProject(target: string): boolean {
+  return [...PROJECT_ROOTS].some((project) => Boolean(pathWithinRoot(project, target)));
+}
+
+/**
+ * Trust only a dedicated DSH directory inside the canonical user home. Custom
+ * external homes fail closed (no fallback writes). Validate every descendant
+ * BEFORE mkdir, so no user-created DSH/plugin ancestor link can redefine trust.
+ * The canonical OS home itself may have legitimate system aliases.
+ */
+function guardedStoreRoot(create: boolean): string | undefined {
+  const home = trustedHome();
+  const dsh = resolveDshHome();
+  const root = pluginImageStoreRoot();
+  if (!home || samePath(home, dsh) || !pathWithinRoot(home, dsh) || insideKnownProject(root)) return undefined;
+  let current = home;
+  for (const part of relative(home, root).split(sep)) {
+    if (!part || part === "." || part === "..") return undefined;
+    current = join(current, part);
+    try {
+      const st = lstatSync(current);
+      if (st.isSymbolicLink() || !st.isDirectory()) return undefined;
+    } catch (err) {
+      if (!create || (err as NodeJS.ErrnoException)?.code !== "ENOENT") return undefined;
+      try {
+        mkdirSync(current, { mode: 0o700 });
+        const st = lstatSync(current);
+        if (st.isSymbolicLink() || !st.isDirectory()) return undefined;
+      } catch {
+        return undefined;
+      }
+    }
+  }
+  return current;
+}
+
+/** Open a real session bucket only under a fully validated user-level root. */
+function openRealSessionDir(sessionId: string, create: boolean): string | undefined {
+  const store = guardedStoreRoot(create);
+  if (!store) return undefined;
+  const dir = join(store, restoreExportDirName(sessionId));
+  try {
+    try {
+      const st = lstatSync(dir);
+      if (st.isSymbolicLink() || !st.isDirectory()) return undefined;
+    } catch (err) {
+      if (!create || (err as NodeJS.ErrnoException)?.code !== "ENOENT") return undefined;
+      mkdirSync(dir, { mode: 0o700 });
+    }
+    if (isSymlink(dir) || !pathWithinRoot(store, realpathSync(dir))) return undefined;
+    const file = join(dir, INDEX_NAME);
+    if (isSymlink(file)) return undefined;
+    if (existsSync(file)) {
+      if (!lstatSync(file).isFile()) return undefined;
+      // Foreign ownership is not corruption to repair, and must also stop TTL/write.
+      let parsed: any;
+      try { parsed = JSON.parse(readFileSync(file, "utf8")); } catch { /* torn index: rebuild allowed */ }
+      if (parsed && Object.hasOwn(parsed, "sessionId") && parsed.sessionId !== sessionId) return undefined;
+    }
+    return dir;
+  } catch {
+    return undefined;
+  }
+}
+
+function atomicWriteFile(sessionId: string, path: string, data: string | Uint8Array, mode: number): boolean {
+  if (openRealSessionDir(sessionId, false) !== dirname(path) || isSymlink(path)) return false;
+  const dir = dirname(path);
+  const tmp = join(dir, `.${basename(path)}.${randomUUID()}.tmp`);
+  const flags = constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0);
+  let fd: number | undefined;
+  try {
+    fd = openSync(tmp, flags, mode);
+    const body = typeof data === "string" ? Buffer.from(data, "utf8") : data;
+    let offset = 0;
+    while (offset < body.byteLength) {
+      const wrote = writeSync(fd, body, offset, body.byteLength - offset);
+      if (wrote <= 0) throw new Error("Incomplete image-store write");
+      offset += wrote;
+    }
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    if (openRealSessionDir(sessionId, false) !== dir) return false;
+    if (isSymlink(path)) {
+      unlinkSync(tmp);
+      return false;
+    }
+    renameSync(tmp, path);
+    return true;
+  } catch {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* already closed */
+      }
+    }
+    try {
+      if (openRealSessionDir(sessionId, false) === dir) unlinkSync(tmp);
+    } catch {
+      /* best-effort */
+    }
+    return false;
+  }
+}
+
+function legacyCwdHint(sessionId: string, sessionRoot?: string): string | undefined {
+  const raw = sessionRoot?.trim() || LEGACY_CWD.get(sessionId);
+  if (!raw) return undefined;
+  const resolved = resolveSafeRoot(raw);
+  if (!resolved) return undefined;
+  if (samePath(resolved, resolveDshHome()) || samePath(resolved, pluginImageStoreRoot())) return undefined;
+  return resolved;
+}
+
+/**
+ * Historical project cache for this session only. Never created, pruned, or
+ * written by this module; undefined when the bucket is missing, foreign, or a symlink.
+ */
+export function legacyProjectExportDir(sessionId: string, sessionRoot?: string): string | undefined {
+  const cwd = legacyCwdHint(sessionId, sessionRoot);
+  if (!cwd) return undefined;
+  const name = restoreExportDirName(sessionId);
+  const parent = join(cwd, ".dsh", "retrieve", "img");
+  const dir = join(parent, name);
+  try {
+    let child = cwd;
+    for (const part of [".dsh", "retrieve", "img", name]) {
+      child = join(child, part);
+      const st = lstatSync(child);
+      if (st.isSymbolicLink() || !st.isDirectory()) return undefined;
+    }
+    const realDir = realpathSync(dir);
+    const realParent = existsSync(parent) && !isSymlink(parent) ? realpathSync(parent) : resolve(parent);
+    if (!pathWithinRoot(realParent, realDir)) return undefined;
+    if (basename(realDir) !== name) return undefined;
+    const cwdReal = existsSync(cwd) ? realpathSync(cwd) : resolve(cwd);
+    if (!pathWithinRoot(cwdReal, realDir)) return undefined;
+    return realDir;
   } catch {
     return undefined;
   }
@@ -285,95 +512,146 @@ export function imagePlaceholdersForSummary(message: any, ref: string | undefine
   return messageImages(message).map((img, i) => imagePlaceholder(img, ref, restorableFlags?.[i] ?? Boolean(img.restorable && ref)));
 }
 
-function ensureGitignore(sessionRoot: string): void {
-  if (samePath(sessionRoot, defaultStateRoot())) return;
-  const marker = join(sessionRoot, ".dsh", ".gitignore");
-  if (existsSync(marker)) return;
+function compactSlots(slots: (IndexedImage | undefined)[]): IndexedImage[] {
+  return slots.filter((im): im is IndexedImage => Boolean(im));
+}
+
+function placeIndexed(index: Map<string, (IndexedImage | undefined)[]>, ref: string, idx: number, image: IndexedImage): void {
+  if (!Number.isInteger(idx) || idx < 0) return;
+  const slots = index.get(ref) ?? [];
+  if (slots[idx] && slots[idx]!.path !== image.path) return;
+  slots[idx] = { ...image, index: idx };
+  index.set(ref, slots);
+}
+
+function parseExportName(name: string): { ref: string; index: number } | undefined {
+  const m = /^(m\d+|orphan-\d+)(?:-(\d+))?-([0-9a-f]{8})\.[A-Za-z0-9]+$/i.exec(name);
+  if (!m) return undefined;
+  return { ref: m[1], index: m[2] ? Number.parseInt(m[2], 10) : 0 };
+}
+
+function rebuildIndexFromFiles(dir: string, index: Map<string, (IndexedImage | undefined)[]>): void {
+  let names: string[];
   try {
-    mkdirSync(dirname(marker), { recursive: true, mode: 0o700 });
-    writeFileSync(marker, "*\n", { encoding: "utf8", mode: 0o600 });
+    names = readdirSync(dir);
   } catch {
-    /* best-effort */
+    return;
+  }
+  names.sort();
+  const conflicts = new Map<string, Set<number>>();
+  for (const name of names) {
+    const parsed = parseExportName(name);
+    if (!parsed) continue;
+    const path = existingPathWithin(dir, join(dir, name));
+    if (!path) continue;
+    let st: ReturnType<typeof statSync>;
+    try {
+      st = statSync(path);
+    } catch {
+      continue;
+    }
+    if (!st.isFile()) continue;
+    if (conflicts.get(parsed.ref)?.has(parsed.index)) continue;
+    const slots = index.get(parsed.ref);
+    if (slots?.[parsed.index] && slots[parsed.index]!.path !== path) {
+      slots[parsed.index] = undefined;
+      const blocked = conflicts.get(parsed.ref) ?? new Set<number>();
+      blocked.add(parsed.index);
+      conflicts.set(parsed.ref, blocked);
+      continue;
+    }
+    const ext = name.split(".").pop() ?? "png";
+    placeIndexed(index, parsed.ref, parsed.index, {
+      mediaType: "image/" + (ext === "jpg" ? "jpeg" : ext),
+      bytes: st.size,
+      path,
+      index: parsed.index,
+    });
   }
 }
 
+function loadIndexFromDir(sessionId: string, dir: string | undefined, allowRebuild: boolean, requireOwner = false): Map<string, (IndexedImage | undefined)[]> {
+  const index = new Map<string, (IndexedImage | undefined)[]>();
+  if (!dir) return index;
+  const file = pathWithinRoot(dir, join(dir, INDEX_NAME));
+  if (file && existsSync(file) && !isSymlink(file)) {
+    try {
+      const parsed = JSON.parse(readFileSync(file, "utf8")) as { sessionId?: string; images?: Record<string, Array<(IndexedImage & { index?: number }) | null>> };
+      if (Object.hasOwn(parsed, "sessionId") && parsed.sessionId !== sessionId) return index;
+      if (requireOwner && parsed.sessionId !== sessionId) return index;
+      if (!parsed.sessionId || parsed.sessionId === sessionId) {
+        for (const [ref, imgs] of Object.entries(parsed.images ?? {})) {
+          // A valid primary index owns the ref even if every pixel is missing.
+          // Preserve this tombstone so legacy or older versions cannot fill it.
+          index.set(ref, []);
+          (imgs ?? []).forEach((im, i) => {
+            if (!im?.path) return;
+            const idx = typeof im.index === "number" && Number.isInteger(im.index) && im.index >= 0 ? im.index : i;
+            const path = existingPathWithin(dir, im.path);
+            if (!path) return;
+            placeIndexed(index, ref, idx, { ...im, path, index: idx });
+          });
+        }
+        return index;
+      }
+    } catch {
+      /* rebuild from files below */
+    }
+  }
+  if (allowRebuild) rebuildIndexFromFiles(dir, index);
+  return index;
+}
+
+function loadIndex(sessionId: string, _sessionRoot?: string): Map<string, (IndexedImage | undefined)[]> {
+  return loadIndexFromDir(sessionId, openRealSessionDir(sessionId, false), true);
+}
+
+function loadLegacyIndex(sessionId: string, sessionRoot?: string): Map<string, (IndexedImage | undefined)[]> {
+  const dir = legacyProjectExportDir(sessionId, sessionRoot);
+  // Old project data has no trusted-store provenance: only an explicit matching
+  // owner index is accepted. Never scan old directories to infer ownership.
+  return loadIndexFromDir(sessionId, dir, false, true);
+}
+
+function saveIndex(sessionId: string, index: Map<string, (IndexedImage | undefined)[]>, _sessionRoot?: string): void {
+  if (index.size === 0) return;
+  const dir = openRealSessionDir(sessionId, true);
+  if (!dir) return;
+  const file = pathWithinRoot(dir, join(dir, INDEX_NAME));
+  if (!file) return;
+  const images: Record<string, IndexedImage[]> = {};
+  for (const [ref, slots] of index) {
+    // Empty refs are authoritative tombstones, not permission to rebuild history.
+    images[ref] = compactSlots(slots);
+  }
+  if (!Object.keys(images).length) return;
+  atomicWriteFile(sessionId, file, JSON.stringify({ sessionId, images }), 0o600);
+}
+
 export function writeRestoredImage(ref: string, idx: number, img: RestorableImage, sessionId: string, sessionRoot?: string): string | null {
+  if (sessionRoot) setImageRestoreRoot(sessionId, sessionRoot);
   const safeRef = ref.replace(/[^a-zA-Z0-9_-]/g, "-");
   if (!safeRef) return null;
-  const dir = restoreExportDir(sessionId, sessionRoot);
-  const root = imageRestoreRoot(sessionId, sessionRoot);
+  const dir = openRealSessionDir(sessionId, true);
+  if (!dir) return null;
   const body = Buffer.from(img.b64, "base64");
   const digest = createHash("sha256").update(body).digest("hex").slice(0, 8);
   const candidate = join(dir, `${safeRef}${idx > 0 ? `-${idx}` : ""}-${digest}.${extFor(img.mediaType)}`);
   const path = pathWithinRoot(dir, candidate);
   if (!path) return null;
   try {
-    if (existsSync(path)) return existingPathWithin(dir, path) ?? path;
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    ensureGitignore(root);
-    writeFileSync(path, body, { mode: 0o600 });
-    return path;
+    if (existsSync(path)) return isSymlink(path) ? null : existingPathWithin(dir, path) ?? null;
+    if (!atomicWriteFile(sessionId, path, body, 0o600)) return null;
+    return existingPathWithin(dir, path) ?? path;
   } catch {
     return null;
   }
 }
 
-function loadIndex(sessionId: string, sessionRoot?: string): Map<string, IndexedImage[]> {
-  const cached = INDEX.get(sessionId);
-  if (cached) return cached;
-  const dir = restoreExportDir(sessionId, sessionRoot);
-  const index = new Map<string, IndexedImage[]>();
-  const file = pathWithinRoot(dir, join(dir, INDEX_NAME));
-  if (file && existsSync(file)) {
-    try {
-      const parsed = JSON.parse(readFileSync(file, "utf8")) as { images?: Record<string, IndexedImage[]> };
-      for (const [ref, imgs] of Object.entries(parsed.images ?? {})) {
-        const kept = (imgs ?? []).filter((im) => im?.path && existingPathWithin(dir, im.path));
-        if (kept.length) index.set(ref, kept);
-      }
-    } catch {
-      /* rebuild from files below */
-    }
-  }
-  if (index.size === 0) {
-    try {
-      for (const name of readdirSync(dir)) {
-        const m = /^(m\d+)(?:-(\d+))?-([0-9a-f]{8})\.[A-Za-z0-9]+$/i.exec(name);
-        if (!m) continue;
-        const path = existingPathWithin(dir, join(dir, name));
-        if (!path) continue;
-        const st = statSync(path);
-        if (!st.isFile()) continue;
-        const ref = m[1];
-        const arr = index.get(ref) ?? [];
-        arr.push({ mediaType: "image/" + (name.split(".").pop() === "jpg" ? "jpeg" : name.split(".").pop() ?? "png"), bytes: st.size, path });
-        index.set(ref, arr);
-      }
-    } catch {
-      /* empty dir */
-    }
-  }
-  INDEX.set(sessionId, index);
-  return index;
-}
-
-function saveIndex(sessionId: string, index: Map<string, IndexedImage[]>, sessionRoot?: string): void {
-  INDEX.set(sessionId, index);
-  const dir = restoreExportDir(sessionId, sessionRoot);
-  const file = pathWithinRoot(dir, join(dir, INDEX_NAME));
-  if (!file) return;
-  try {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const images: Record<string, IndexedImage[]> = {};
-    for (const [ref, imgs] of index) images[ref] = imgs;
-    writeFileSync(file, JSON.stringify({ sessionId, images }), { encoding: "utf8", mode: 0o600 });
-  } catch {
-    /* best-effort */
-  }
-}
-
 export function pruneRetrieveImgExports(sessionId: string, sessionRoot?: string, ttlMs = DEFAULT_TTL_MS): number {
-  const dir = restoreExportDir(sessionId, sessionRoot);
+  if (sessionRoot) setImageRestoreRoot(sessionId, sessionRoot);
+  const dir = openRealSessionDir(sessionId, false);
+  if (!dir) return 0;
   let entries: string[];
   try {
     entries = readdirSync(dir);
@@ -386,6 +664,7 @@ export function pruneRetrieveImgExports(sessionId: string, sessionRoot?: string,
     if (name === INDEX_NAME) continue;
     const p = join(dir, name);
     try {
+      if (openRealSessionDir(sessionId, false) !== dir || isSymlink(p)) continue;
       const st = statSync(p);
       if (st.isFile() && now - st.mtimeMs > ttlMs) {
         unlinkSync(p);
@@ -396,25 +675,23 @@ export function pruneRetrieveImgExports(sessionId: string, sessionRoot?: string,
     }
   }
   if (removed > 0) {
-    const index = loadIndex(sessionId, sessionRoot);
-    for (const [ref, imgs] of [...index.entries()]) {
-      const kept = imgs.filter((im) => existsSync(im.path));
-      if (kept.length) index.set(ref, kept);
-      else index.delete(ref);
-    }
-    saveIndex(sessionId, index, sessionRoot);
-    try {
-      if (readdirSync(dir).every((name) => name === INDEX_NAME)) {
-        try {
-          unlinkSync(join(dir, INDEX_NAME));
-        } catch {
-          /* ignore */
-        }
-        rmdirSync(dir);
-        INDEX.delete(sessionId);
+    if (openRealSessionDir(sessionId, false) !== dir) return removed;
+    // Keep the authoritative mapping when valid; only torn/missing indexes
+    // may rebuild. A surviving older file must not replace a newer indexed image.
+    const index = loadIndex(sessionId);
+    if (index.size === 0) {
+      try {
+        if (existsSync(join(dir, INDEX_NAME)) && !isSymlink(join(dir, INDEX_NAME))) unlinkSync(join(dir, INDEX_NAME));
+      } catch {
+        /* ignore */
       }
-    } catch {
-      /* leave dir */
+      try {
+        if (readdirSync(dir).length === 0) rmdirSync(dir);
+      } catch {
+        /* leave dir */
+      }
+    } else {
+      saveIndex(sessionId, index);
     }
   }
   return removed;
@@ -428,34 +705,44 @@ export function archiveSessionImages(opts: {
   onlyIndexes?: Set<number>;
 }): ImageNote[] {
   const { sessionId, messages, sessionRoot, onlyIndexes } = opts;
+  // cwd is remembered only as a same-session legacy read hint.
   if (sessionRoot) setImageRestoreRoot(sessionId, sessionRoot);
-  pruneRetrieveImgExports(sessionId, sessionRoot);
+  pruneRetrieveImgExports(sessionId);
   const byIndex = new Map<number, string>();
   for (const r of opts.refs) {
     if (!byIndex.has(r.index) && r.ref && r.ref !== "BLOCKED") byIndex.set(r.index, r.ref);
   }
   const index = loadIndex(sessionId, sessionRoot);
   const notes: ImageNote[] = [];
+  let wrote = false;
   for (let i = 0; i < messages.length; i++) {
     if (onlyIndexes && !onlyIndexes.has(i)) continue;
     const ref = byIndex.get(i);
     const seen = messageImages(messages[i]);
     if (!seen.length) continue;
-    const bytes = seen.flatMap((img) => (img.restorable ? [img.restorable] : []));
     const written: IndexedImage[] = [];
-    bytes.forEach((im, n) => {
-      const path = writeRestoredImage(ref ?? `orphan-${i}`, n, im, sessionId, sessionRoot);
+    // Preserve original image positions, including gaps for unavailable pixels.
+    seen.forEach((entry, n) => {
+      const im = entry.restorable;
+      if (!im) return;
+      const path = writeRestoredImage(ref ?? `orphan-${i}`, n, im, sessionId);
       if (!path || !ref) return;
-      written.push({ mediaType: im.mediaType, bytes: im.bytes, width: im.width, height: im.height, path });
+      wrote = true;
+      written.push({ mediaType: im.mediaType, bytes: im.bytes, width: im.width, height: im.height, path, index: n });
     });
-    if (ref && written.length) index.set(ref, written);
-    const flags = seen.map((img) => Boolean(ref && img.restorable && written.some((w) => w.bytes === img.restorable?.bytes)));
+    if (ref && written.length) {
+      // This host message is authoritative; do not retain an old image at a rebased ref.
+      const slots: (IndexedImage | undefined)[] = [];
+      for (const im of written) slots[im.index!] = im;
+      index.set(ref, slots);
+    }
+    const flags = seen.map((_, n) => written.some((im) => im.index === n));
     for (const [n, img] of seen.entries()) {
       const restorable = flags[n] ?? false;
       notes.push({ ref, placeholder: imagePlaceholder(img, ref, restorable), restorable });
     }
   }
-  saveIndex(sessionId, index, sessionRoot);
+  if (wrote || index.size > 0) saveIndex(sessionId, index);
   return notes;
 }
 
@@ -473,15 +760,26 @@ function refNum(ref: string): number {
   return m ? Number.parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
 }
 
+function mergeSessionIndexes(primary: Map<string, (IndexedImage | undefined)[]>, legacy: Map<string, (IndexedImage | undefined)[]>): Map<string, (IndexedImage | undefined)[]> {
+  const out = new Map<string, (IndexedImage | undefined)[]>();
+  for (const [ref, slots] of primary) out.set(ref, slots.slice());
+  for (const [ref, slots] of legacy) {
+    // A primary ref describes the whole message, including absent/ambiguous
+    // positions. Never fill those holes with older project pixels.
+    if (!out.has(ref)) out.set(ref, slots.slice());
+  }
+  return out;
+}
+
 export function describeRestorable(sessionId: string, sessionRoot?: string, cap = LIST_CAP): string[] {
-  const index = loadIndex(sessionId, sessionRoot);
-  const dir = restoreExportDir(sessionId, sessionRoot);
+  const index = mergeSessionIndexes(loadIndex(sessionId, sessionRoot), loadLegacyIndex(sessionId, sessionRoot));
   const lines: string[] = [];
   const refs = [...index.keys()].sort((a, b) => refNum(a) - refNum(b));
   outer: for (const ref of refs) {
-    const imgs = (index.get(ref) ?? []).filter((im) => existingPathWithin(dir, im.path));
-    for (let i = 0; i < imgs.length; i++) {
-      const im = imgs[i];
+    const slots = index.get(ref) ?? [];
+    for (let i = 0; i < slots.length; i++) {
+      const im = slots[i];
+      if (!im) continue;
       let note = shortType(im.mediaType) || "image";
       if (im.width != null && im.height != null) note += ` ${im.width}x${im.height}`;
       note += ` · ${Math.max(1, Math.round(im.bytes / 1024))}KB`;
@@ -493,9 +791,8 @@ export function describeRestorable(sessionId: string, sessionRoot?: string, cap 
 }
 
 export function restorableImageList(sessionId: string, sessionRoot?: string): IndexedImage[] {
-  const index = loadIndex(sessionId, sessionRoot);
-  const dir = restoreExportDir(sessionId, sessionRoot);
-  return [...index.values()].flat().filter((im) => existingPathWithin(dir, im.path));
+  const index = mergeSessionIndexes(loadIndex(sessionId, sessionRoot), loadLegacyIndex(sessionId, sessionRoot));
+  return [...index.values()].flatMap((slots) => compactSlots(slots));
 }
 
 /** Validity-based dispatch: blank/null imageRef is text paging, not list. */
@@ -516,13 +813,20 @@ function parseImageRef(raw: string): { ref: string; index?: number } | { list: t
   return { ref: value };
 }
 
+function locatedImages(slots: (IndexedImage | undefined)[], want?: number): IndexedImage[] {
+  if (want == null) return compactSlots(slots);
+  const im = slots[want];
+  return im ? [im] : [];
+}
+
 export function resolveImageRestore(opts: { sessionId: string; imageRef: string; sessionRoot?: string }): ImageRestoreResult {
   const { sessionId, sessionRoot } = opts;
   if (sessionRoot) setImageRestoreRoot(sessionId, sessionRoot);
-  pruneRetrieveImgExports(sessionId, sessionRoot);
+  pruneRetrieveImgExports(sessionId);
   const parsed = parseImageRef(opts.imageRef);
-  const index = loadIndex(sessionId, sessionRoot);
-  const dir = restoreExportDir(sessionId, sessionRoot);
+  const primary = loadIndex(sessionId, sessionRoot);
+  const legacy = loadLegacyIndex(sessionId, sessionRoot);
+  const index = mergeSessionIndexes(primary, legacy);
 
   if ("list" in parsed) {
     const lines = describeRestorable(sessionId, sessionRoot);
@@ -538,9 +842,9 @@ export function resolveImageRestore(opts: { sessionId: string; imageRef: string;
   }
 
   const raw = parsed.ref;
-  const imgs = (index.get(raw) ?? []).filter((im) => existingPathWithin(dir, im.path));
-  const selected = parsed.index == null ? imgs : imgs[parsed.index] ? [imgs[parsed.index]] : [];
-  if (!index.has(raw) && imgs.length === 0) {
+  const slots = index.get(raw) ?? [];
+  const selected = locatedImages(slots, parsed.index);
+  if (!index.has(raw) && selected.length === 0) {
     return {
       ok: false,
       imageRef: opts.imageRef.trim(),
@@ -554,8 +858,8 @@ export function resolveImageRestore(opts: { sessionId: string; imageRef: string;
       text: `[decompress FAILED: no restorable image for ref "${opts.imageRef.trim()}" (it carries no image, had no stored bytes, or is not from this session). Call cursor_context_decompress({ imageRef: "list" }) to see what is available.]`,
     };
   }
-  const images = selected.map((im) => ({ ...im, path: existingPathWithin(dir, im.path)! }));
-  const missing = (parsed.index == null ? (index.get(raw) ?? []).length : 1) - images.length;
+  const images = selected;
+  const missing = (parsed.index == null ? compactSlots(index.get(raw) ?? []).length : 1) - images.length;
   return {
     ok: true,
     mode: "image",
