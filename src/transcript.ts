@@ -45,7 +45,12 @@ function blocks(content: unknown, images?: Images): any[] {
       const image = b.offloaded === true ? undefined : b.data ? b : images?.get(String(b.attachment?.attachmentId));
       out.push(image ? { type: "image", data: image.data, mimeType: image.mimeType } : { type: "text", text: IMAGE_NOTE });
     }
-    else if (b?.type === "file") out.push({ type: "text", text: `[file attachment: ${b.attachment?.name ?? b.attachment?.path ?? "file"}]` });
+    else if (b?.type === "file") {
+      // The SDK accepts image bytes, not generic file payloads. Keep the host's
+      // reference (including its path/id), so recovery does not reduce it to a name.
+      const { name, path, attachmentId, mediaType } = b.attachment ?? {};
+      out.push({ type: "text", text: `[file attachment: ${JSON.stringify({ name, path, attachmentId, mediaType })}]` });
+    }
   }
   return out;
 }

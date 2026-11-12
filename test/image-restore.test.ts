@@ -1,6 +1,6 @@
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -230,11 +230,15 @@ test("TTL prune removes expired files from this session only", () => {
   const root = tempRoot("ttl");
   const pa = writeRestoredImage("m00001", 0, pngImg, "ttl-a", root)!;
   const pb = writeRestoredImage("m00001", 0, pngImg, "ttl-b", root)!;
-  const past = Date.now() - 10 * 24 * 3600 * 1000;
-  // utimes would be nicer; prune compares mtime, so a 0 ttl with a fresh file should keep it,
-  // and a negative-age comparison with a huge ttl keeps both. Force-expire via 0 ttl after touching? use ttlMs=0.
-  const removed = pruneRetrieveImgExports("ttl-a", root, 0);
-  assert.ok(removed >= 1);
+  const fresh = writeRestoredImage("m00002", 0, pngImg, "ttl-a", root)!;
+  const past = new Date(Date.now() - 10 * 24 * 3600 * 1000);
+  // Expire both sessions deterministically; never rely on a freshly written file
+  // being older than Date.now() on the filesystem's timestamp resolution.
+  utimesSync(pa, past, past);
+  utimesSync(pb, past, past);
+  const removed = pruneRetrieveImgExports("ttl-a", root);
+  assert.equal(removed, 1);
   assert.equal(existsSync(pa), false);
+  assert.equal(existsSync(fresh), true);
   assert.equal(existsSync(pb), true);
 });

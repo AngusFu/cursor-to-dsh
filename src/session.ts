@@ -23,7 +23,6 @@ import {
   hash,
   imagesOf,
   incrementText,
-  currentTurnImages,
   renderTranscript,
   systemPromptAddition,
   textOf,
@@ -31,6 +30,7 @@ import {
   asObject,
   type Image,
 } from "./prompt.ts";
+import { currentTurnStart, renderTurnReplay } from "./turn-replay.ts";
 import { ERROR_CODES, Reply } from "./reply.ts";
 import type { Transcript } from "./transcript.ts";
 import { calibrateOverhead, cursorOverhead, runUsage } from "./usage.ts";
@@ -109,6 +109,8 @@ class CursorSession {
   /** False for a run that re-delivers tool results: Cursor saw part of that turn twice. */
   runCalibrates = true;
   sentFirst = false;
+  /** Host suffix for the unfinished user turn; not an SDK checkpoint/seen cursor. */
+  turnStart?: number;
   /** Full effective kernel view to replay after a destructive M2 rebuild. */
   replayView?: AcpWireView;
   /** Owner keys whose images are still live in the replay view (not folded). */
@@ -220,6 +222,7 @@ class CursorSession {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.turnStart = undefined;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     for (const p of this.pending) settle(() => p.resolve({ content: [{ type: "text", text: "Cancelled by the host." }], isError: true }));
     this.pending = [];
@@ -385,7 +388,8 @@ function syncTools(s: CursorSession, tools: any[]): any {
       execute: (args: unknown, ctx: any) => s.registerCall(tool.name, args, ctx?.toolCallId),
     };
   }
-  return Object.keys(custom).length ? { local: { customTools: custom } } : {};
+  // An omitted override makes the SDK reuse creation-time tools; {} explicitly clears them.
+  return { local: { customTools: custom } };
 }
 
 async function openSession(
@@ -416,10 +420,6 @@ function signatureOf(modelId: string, params: Param[] | undefined): string {
 }
 
 /**
- * Cursor fixes a run's tools when it starts. Cancel the waiting run and deliver its tool
- * results in a follow-up send that carries the new tools. False if the run would not stop.
- */
-/**
  * Cursor lists the custom tools to the model when a conversation starts and does not announce
  * later ones (measured: the model said a tool added on the second send did not exist).
  */
@@ -428,11 +428,10 @@ function addedToolsNote(s: CursorSession, tools: any[]): string {
   return added.length ? `[Tool update: these tools were added and are now available: ${added.join(", ")}. Look up their schemas before calling them.]` : "";
 }
 
+/** Cancel the fixed-tool run and replay the unfinished turn; false if cancellation stalls. */
 async function continueWithNewTools(
   s: CursorSession,
-  results: Results,
-  tools: any[],
-  note: string,
+  t: Transcript,
   send: (s: CursorSession, text: string, images: Image[] | undefined, options: any) => Promise<any>,
 ): Promise<boolean> {
   settle(() => void Promise.resolve(s.run?.cancel?.()).catch(() => {}));
@@ -441,16 +440,13 @@ async function continueWithNewTools(
   if (!s.runDone) return false;
   for (const p of s.pending) settle(() => p.resolve({ content: [{ type: "text", text: "Delivered in the next message." }], isError: false }));
   s.pending = [];
-  const parts = ["[Tool results for your last tool calls. The run was restarted because the host's tools or system prompt changed; the tools on this request are current.]"];
-  for (const r of results) {
-    parts.push(`### ${r.call.name} (${r.call.id})${r.message.isError ? " [error]" : ""}\n${textOf(r.message.content) || "(no output)"}`);
-    if (r.extra) parts.push(r.extra);
-  }
-  if (note) parts.push(note);
-  const added = addedToolsNote(s, tools);
-  if (added) parts.push(added);
-  parts.push("Continue the task.");
-  const run = await send(s, parts.join("\n\n"), imagesOf(results.map((r) => r.message)), syncTools(s, tools));
+  // A cancelled run may have committed none of its input. `seen` only tracks host
+  // delivery, so it cannot establish what the SDK checkpoint retained. Replay the
+  // complete open turn, including earlier results and steers, from host messages.
+  const replay = renderTurnReplay(t.systemPrompt, t.messages.slice(s.turnStart ?? currentTurnStart(t.messages)));
+  const added = addedToolsNote(s, t.tools);
+  const text = [replay.text, added].filter(Boolean).join("\n\n");
+  const run = await send(s, text, replay.images, syncTools(s, t.tools));
   s.startRun(run, false);
   return true;
 }
@@ -1070,6 +1066,7 @@ export async function runTurn(opts: {
   const contextTokens = () => transcriptTokens() + cursorOverhead(modelId);
 
   const send = async (s: CursorSession, text: string, images: Image[] | undefined, sendOptions: any) => {
+    signal?.throwIfAborted();
     if (s.replayView) {
       const view = s.replayView;
       const owners = s.replayImageKeys ?? new Set(view.messages.map((m) => coreMessageOwner(m.id)));
@@ -1085,11 +1082,12 @@ export async function runTurn(opts: {
   };
   const sendFirst = async (s: CursorSession, prefix = "", acpView?: AcpWireView) => {
     s.sentFirst = true;
+    s.turnStart = currentTurnStart(t.messages);
     const body = acpView
       ? renderTranscriptWithAcpView(effectiveSystem, t.messages, acpView.messages)
       : renderTranscript(effectiveSystem, t.messages);
     const text = [prefix, body].filter(Boolean).join("\n\n");
-    s.startRun(await send(s, text, currentTurnImages(t.messages), {}));
+    s.startRun(await send(s, text, imagesOf(t.messages.slice(s.turnStart)), {}));
   };
 
   let s = (SESSIONS.get(sessionKey) ?? []).find((x) => x.signature === signature && !x.closed && !x.busy);
@@ -1119,6 +1117,10 @@ export async function runTurn(opts: {
   const onAbort = () => s?.wake();
   signal?.addEventListener?.("abort", onAbort, { once: true });
   try {
+    if (signal?.aborted) {
+      if (s) dropSession(s);
+      return reply.finish("aborted");
+    }
     if (!s || plan.kind === "fresh") {
       const started = Date.now();
       s = await openSession(sessionKey, modelId, params, t, apiKey, cwd, deps);
@@ -1148,6 +1150,7 @@ export async function runTurn(opts: {
       debug(`fresh key=${sessionKey.slice(0, 12)} create=${created - started}ms send=${Date.now() - created}ms chars=${renderTranscript(t.systemPrompt, t.messages).length} tools=${t.tools.length}`);
       freshRun = true;
     } else if (plan.kind === "send") {
+      s.turnStart = s.seen.length;
       s.busy = true;
       // Between runs only: a run in flight writes its own checkpoint when it
       // ends and would undo the rewrite.
@@ -1191,7 +1194,7 @@ export async function runTurn(opts: {
     } else if (note || s.toolsKey !== toolsKeyOf(t.tools)) {
       s.busy = true;
       debug(`tools or system prompt changed mid-run key=${sessionKey.slice(0, 12)}`);
-      if (await continueWithNewTools(s, plan.results, t.tools, note, send)) {
+      if (await continueWithNewTools(s, t, send)) {
         s.systemPrompt = t.systemPrompt;
       } else {
         dropSession(s);
@@ -1297,6 +1300,7 @@ export async function runTurn(opts: {
         reply.usage = runUsage(result?.usage, s.modelCalls, contextTokens());
         if (s.modelCalls === 1 && s.runCalibrates) calibrateOverhead(modelId, result?.usage, transcriptTokens());
         s.run = undefined;
+        s.turnStart = undefined;
         s.emittedRunChars = 0;
         reply.finish("stop");
         s.seen.push(fingerprint(reply.message));

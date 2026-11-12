@@ -20,12 +20,16 @@ function fakeCursor(script: (ctx: any) => AsyncGenerator<any, any, void>) {
   const created: any[] = [];
   const sends: any[] = [];
   const sendOpts: any[] = [];
+  // Fake durable user-input checkpoint: cancelled runs deliberately commit nothing.
+  const checkpoints: any[][] = [];
   const createAgent = async (opts: any) => {
     created.push(opts);
     const agentTools = opts.local?.customTools ?? {};
+    const committed: any[] = [];
     return {
       send: async (msg: any, options?: any) => {
         sends.push(msg);
+        checkpoints.push([...committed]);
         sendOpts.push(options);
         const tools = options?.local?.customTools ?? agentTools;
         let status: any = { status: "finished", usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 80, cacheWriteTokens: 10 } };
@@ -48,6 +52,7 @@ function fakeCursor(script: (ctx: any) => AsyncGenerator<any, any, void>) {
             queue.push(ev);
             wake?.();
           }
+          if (!cancelled && status?.status === "finished") committed.push(msg);
           finished = true;
           wake?.();
         })();
@@ -75,7 +80,7 @@ function fakeCursor(script: (ctx: any) => AsyncGenerator<any, any, void>) {
       close: () => {},
     };
   };
-  return { createAgent, created, sends, sendOpts };
+  return { createAgent, created, sends, sendOpts, checkpoints };
 }
 
 const say = (text: string) => ({ type: "assistant", message: { content: [{ type: "text", text }] } });
@@ -309,7 +314,7 @@ test("system prompt: a later system message with added lines keeps the agent, a 
 
 test("a tool change while DSH runs a tool continues on the same agent with the new tools", async () => {
   const cursor = fakeCursor(async function* (ctx) {
-    if (typeof ctx.msg === "string" && ctx.msg.startsWith("[Tool results")) {
+    if (sentText(ctx.msg).startsWith("[Host turn replay:")) {
       await ctx.callTool("x_doctor", {}, "c-x");
       yield say("done");
       return;
@@ -324,7 +329,8 @@ test("a tool change while DSH runs a tool continues on the same agent with the n
   const r2 = await call(adapter, [u1, r1.assistant, res1], { tools: [readTool, xTool] });
   assert.equal(r2.calls[0]?.name, "x_doctor");
   assert.equal(cursor.created.length, 1);
-  assert.match(cursor.sends[1], /### read \(c-1\)\nFILE[\s\S]*available: x_doctor\./);
+  assert.equal(turnSnapshot(cursor.sends[1]).messages.at(-1).content[0].text, "FILE");
+  assert.match(sentText(cursor.sends[1]), /available: x_doctor\./);
   const r3 = await call(adapter, [u1, r1.assistant, res1, r2.assistant, toolResult("c-x", "OK")], { tools: [readTool, xTool] });
   assert.equal(r3.text, "done");
   assert.equal(cursor.sends.length, 2, "the follow-up run continued");
@@ -569,7 +575,7 @@ const excludedAcpTools = [
 test("regression: unchanged host ACP tools do not restart an in-flight read", async () => {
   let got: any;
   const cursor = fakeCursor(async function* (ctx) {
-    if (String(ctx.msg).includes("[Tool results for your last tool calls.")) {
+    if (sentText(ctx.msg).includes("[Host turn replay:")) {
       yield say("WRONG: restarted");
       return;
     }
@@ -599,7 +605,7 @@ test("regression: excluded ACP tools are not falsely announced on a new user tur
 
 test("regression: real tool changes still restart once when excluded ACP tools exist", async () => {
   const cursor = fakeCursor(async function* (ctx) {
-    if (typeof ctx.msg === "string" && ctx.msg.startsWith("[Tool results")) {
+    if (sentText(ctx.msg).startsWith("[Host turn replay:")) {
       await ctx.callTool("x_doctor", {}, "c-x");
       yield say("done");
       return;
@@ -614,8 +620,283 @@ test("regression: real tool changes still restart once when excluded ACP tools e
   const r2 = await call(adapter, [u1, r1.assistant, res1], { tools: [readTool, xTool, ...excludedAcpTools] });
   assert.equal(r2.calls[0]?.name, "x_doctor");
   assert.equal(cursor.created.length, 1);
-  assert.match(cursor.sends[1], /### read \(c-1\)\nFILE[\s\S]*available: x_doctor\./);
+  assert.equal(turnSnapshot(cursor.sends[1]).messages.at(-1).content[0].text, "FILE");
+  assert.match(sentText(cursor.sends[1]), /available: x_doctor\./);
   const r3 = await call(adapter, [u1, r1.assistant, res1, r2.assistant, toolResult("c-x", "OK")], { tools: [readTool, xTool, ...excludedAcpTools] });
   assert.equal(r3.text, "done");
   assert.equal(cursor.sends.length, 2, "the follow-up run continued");
+});
+
+// Input-fidelity regressions. The fake SDK rolls back cancelled sends; these do not
+// assert anything about a real model's decisions or its willingness to obey instructions.
+const sentText = (msg: any): string => typeof msg === "string" ? msg : msg.text;
+function turnSnapshot(msg: any): any {
+  const body = sentText(msg).split("[Turn snapshot JSON]\n")[1]?.split("\n[End turn snapshot JSON]")[0];
+  assert.ok(body, "recovery must carry a structured, role-labelled turn snapshot");
+  return JSON.parse(body);
+}
+
+for (const change of ["add tool", "remove tool", "append system prompt"] as const) {
+  test(`preserve turn: ${change} replays the real question with uncommitted checkpoint`, async () => {
+    let n = 0;
+    const cursor = fakeCursor(async function* (ctx) {
+      if (++n === 1) {
+        await ctx.callTool("read", { path: "git-history" }, "who");
+        yield say("stale run must not win");
+      } else yield say("answer only");
+    });
+    const adapter = adapterFor(cursor);
+    const question = change === "remove tool" ? "直接git blam不行吗" : "之前是谁加的这俩";
+    const evidence = change === "remove tool" ? "git blame: ba697c8 (Josip) 42" : "git log: ba697c8 Josip";
+    const before = change === "remove tool" ? [readTool, xTool] : [readTool];
+    const after = change === "add tool" ? [readTool, xTool] : [readTool];
+    const u = user(question);
+    const r1 = await call(adapter, [sys("SYS"), u], { tools: before });
+    const r2 = await call(adapter, [sys(change === "append system prompt" ? "SYS\nADDED" : "SYS"), u, r1.assistant, toolResult("who", evidence)], { tools: after });
+    assert.equal(r2.finish.kind, "stop");
+    assert.equal(cursor.sends.length, 2);
+    assert.equal(cursor.created.length, 1);
+    assert.deepEqual(cursor.checkpoints[1], [], "cancel did not commit the original question");
+    assert.ok(sentText(cursor.sends[1]).includes(question), "original question must survive cancellation");
+    const snapshot = turnSnapshot(cursor.sends[1]);
+    assert.deepEqual(snapshot.messages.map((m: any) => m.role), ["user", "assistant", "tool"]);
+    assert.equal(snapshot.messages[0].content[0].text, question);
+    assert.equal(snapshot.messages[2].toolCallId, "who");
+    assert.equal(snapshot.messages[2].toolName, "read");
+    assert.equal(snapshot.messages[2].content[0].text, evidence);
+    assert.equal(snapshot.systemContext, change === "append system prompt" ? "SYS\nADDED" : "SYS");
+    assert.doesNotMatch(sentText(cursor.sends[1]), /Continue the task\./);
+    assert.match(sentText(cursor.sends[1]), /not a new user instruction or authorization/);
+    assert.deepEqual(Object.keys(cursor.sendOpts[1].local.customTools), after.map((t) => t.name));
+  });
+}
+
+test("preserve turn: consecutive handoffs retain prior evidence without recursive snapshots", async () => {
+  let n = 0;
+  const cursor = fakeCursor(async function* (ctx) {
+    const step = ++n;
+    if (step <= 2) {
+      await ctx.callTool("read", { path: "history" }, `repeat-${step}`);
+      yield say("stale");
+    } else yield say("Josip, ba697c8");
+  });
+  const adapter = adapterFor(cursor);
+  const u = user("之前是谁加的这俩");
+  const r1 = await call(adapter, [sys("SYS"), u]);
+  const t1 = toolResult("repeat-1", "git log: Josip ba697c8");
+  const r2 = await call(adapter, [sys("SYS\nADDED"), u, r1.assistant, t1], { tools: [readTool, xTool] });
+  const t2 = toolResult("repeat-2", "git blame: Josip ba697c8");
+  await call(adapter, [sys("SYS\nADDED"), u, r1.assistant, t1, r2.assistant, t2]);
+  assert.deepEqual(cursor.checkpoints[1], []);
+  assert.deepEqual(cursor.checkpoints[2], []);
+  const snapshot = turnSnapshot(cursor.sends[2]);
+  assert.equal(snapshot.systemContext, "SYS\nADDED", "a cancelled earlier system update must also survive");
+  assert.deepEqual(snapshot.messages.map((m: any) => m.role), ["user", "assistant", "tool", "assistant", "tool"]);
+  assert.equal(snapshot.messages[2].content[0].text, "git log: Josip ba697c8");
+  assert.equal(snapshot.messages[4].content[0].text, "git blame: Josip ba697c8");
+  assert.equal(sentText(cursor.sends[2]).split("之前是谁加的这俩").length - 1, 1);
+  assert.equal(sentText(cursor.sends[2]).split("[Turn snapshot JSON]").length - 1, 1);
+  assert.ok(sentText(cursor.sends[2]).length < sentText(cursor.sends[1]).length + 1500);
+});
+
+test("preserve turn: completed turn is cleared before the next intent", async () => {
+  let n = 0;
+  const cursor = fakeCursor(async function* (ctx) {
+    const step = ++n;
+    if (step % 2) {
+      await ctx.callTool("read", {}, `round-${step}`);
+      yield say("stale");
+    } else yield say("answered");
+  });
+  const adapter = adapterFor(cursor);
+  const a = user("之前是谁加的这俩");
+  const r1 = await call(adapter, [a]);
+  const e1 = toolResult("round-1", "Josip ba697c8");
+  const r2 = await call(adapter, [a, r1.assistant, e1], { tools: [readTool, xTool] });
+  const b = user("直接git blam不行吗");
+  const history = [a, r1.assistant, e1, r2.assistant, b];
+  const r3 = await call(adapter, history, { tools: [readTool, xTool] });
+  assert.equal(cursor.sends[2], "直接git blam不行吗");
+  await call(adapter, [...history, r3.assistant, toolResult("round-3", "blame: NEW RESULT")]);
+  const snapshot = turnSnapshot(cursor.sends[3]);
+  assert.equal(snapshot.messages[0].content[0].text, "直接git blam不行吗");
+  assert.doesNotMatch(sentText(cursor.sends[3]), /之前是谁加的这俩|Josip ba697c8/);
+  assert.equal(cursor.created.length, 1, "do not rewrite SDK history to recover a turn");
+});
+
+test("preserve turn: a steer delivered through an earlier tool result stays ordered on a later handoff", async () => {
+  let n = 0;
+  let inline: any;
+  const cursor = fakeCursor(async function* (ctx) {
+    if (++n === 1) {
+      inline = await ctx.callTool("read", {}, "steer-1");
+      await ctx.callTool("read", {}, "steer-2");
+      yield say("stale");
+    } else yield say("answer the latest request");
+  });
+  const adapter = adapterFor(cursor);
+  const u = user("inspect the change");
+  const r1 = await call(adapter, [u]);
+  const steer = user("只查作者，别提交");
+  const context = dev("current branch: feature");
+  const partial = [u, r1.assistant, toolResult("steer-1", "log: Josip"), steer, context];
+  const r2 = await call(adapter, partial);
+  assert.equal(cursor.sends.length, 1, "steer may first travel through the existing tool promise");
+  assert.match(JSON.stringify(inline), /只查作者，别提交/);
+  const latest = user("改用git blame回答，仍然不提交");
+  await call(adapter, [...partial, r2.assistant, toolResult("steer-2", "blame: ba697c8"), latest], { tools: [readTool, xTool] });
+  const snapshot = turnSnapshot(cursor.sends[1]);
+  assert.deepEqual(snapshot.messages.filter((m: any) => m.role === "user").map((m: any) => m.content[0].text), ["inspect the change", "只查作者，别提交", "改用git blame回答，仍然不提交"]);
+  assert.equal(snapshot.messages.filter((m: any) => m.role === "developer")[0].content[0].text, "current branch: feature");
+  assert.equal(sentText(cursor.sends[1]).split("只查作者，别提交").length - 1, 1, "do not duplicate a steer as tool output");
+});
+
+test("preserve turn: original, steer and tool images survive repeated handoffs with file references", async () => {
+  let n = 0;
+  const cursor = fakeCursor(async function* (ctx) {
+    if (++n <= 2) { await ctx.callTool("read", {}, `image-${n}`); yield say("stale"); }
+    else yield say("seen");
+  });
+  const adapter = adapterFor(cursor, { readImage: async (ref: any) => ({ data: `B64-${ref.attachmentId}`, mimeType: "image/png" }) });
+  const original = { ...user("look, don't commit"), content: [...text("look, don't commit"), imageBlock("original"), { type: "file", attachment: { attachmentId: "file-1", name: "evidence.txt", path: "/work/evidence.txt", mediaType: "text/plain" } }] };
+  const r1 = await call(adapter, [original]);
+  const steer = { ...user("compare this"), content: [...text("compare this"), imageBlock("steer")] };
+  const evidence = { ...toolResult("image-1", "tool image"), content: [...text("tool image"), imageBlock("tool")] };
+  const partial = [original, r1.assistant, evidence, steer];
+  const r2 = await call(adapter, partial, { tools: [readTool, xTool] });
+  await call(adapter, [...partial, r2.assistant, toolResult("image-2", "done")]);
+  assert.equal(cursor.created.length, 1, "images must survive the cancelled-run path, not just a fresh replay");
+  assert.deepEqual(cursor.checkpoints[1], []);
+  assert.deepEqual(cursor.checkpoints[2], []);
+  const expected = ["original", "tool", "steer"].map((id) => ({ data: `B64-${id}`, mimeType: "image/png" }));
+  assert.deepEqual(cursor.sends[1].images, expected);
+  assert.deepEqual(cursor.sends[2].images, expected);
+  const snapshot = turnSnapshot(cursor.sends[2]);
+  assert.deepEqual(snapshot.messages.flatMap((m: any) => m.content).filter((b: any) => b.type === "image").map((b: any) => b.imageIndex), [0, 1, 2]);
+  assert.match(JSON.stringify(snapshot), /evidence\.txt/);
+  assert.match(JSON.stringify(snapshot), /\/work\/evidence\.txt/);
+  assert.match(JSON.stringify(snapshot), /file-1/);
+  assert.doesNotMatch(sentText(cursor.sends[2]), /B64-original|B64-steer|B64-tool/);
+});
+
+test("preserve turn: rewritten system opens a fresh agent with original images, not the old prompt", async () => {
+  let n = 0;
+  const cursor = fakeCursor(async function* (ctx) {
+    if (++n === 1) { await ctx.callTool("read", {}, "rewrite"); yield say("stale"); }
+    else yield say("answered");
+  });
+  const adapter = adapterFor(cursor, { readImage: async () => ({ data: "ORIGINAL-IMAGE", mimeType: "image/png" }) });
+  const u = { ...user("直接git blam不行吗"), content: [...text("直接git blam不行吗"), imageBlock("source")] };
+  const r1 = await call(adapter, [sys("OLD SYSTEM"), u]);
+  await call(adapter, [sys("NEW SYSTEM"), u, r1.assistant, toolResult("rewrite", "blame: Josip ba697c8")]);
+  assert.equal(cursor.created.length, 2);
+  assert.match(sentText(cursor.sends[1]), /NEW SYSTEM[\s\S]*直接git blam不行吗[\s\S]*Josip ba697c8/);
+  assert.doesNotMatch(sentText(cursor.sends[1]), /OLD SYSTEM/);
+  assert.deepEqual(cursor.sends[1].images, [{ data: "ORIGINAL-IMAGE", mimeType: "image/png" }]);
+});
+
+test("preserve turn: abort disposes the unfinished intent before reuse", async () => {
+  let n = 0;
+  const cursor = fakeCursor(async function* (ctx) {
+    const step = ++n;
+    if (step <= 2) { await ctx.callTool("read", {}, `abort-${step}`); yield say("stale"); }
+    else yield say("new answer");
+  });
+  const adapter = adapterFor(cursor);
+  const old = user("ABORTED OLD INTENT");
+  const r1 = await call(adapter, [old]);
+  const controller = new AbortController();
+  controller.abort();
+  const aborted = await call(adapter, [old, r1.assistant, toolResult("abort-1", "old evidence")], { signal: controller.signal, tools: [readTool, xTool] });
+  assert.equal(cursor.sends.length, 1, "an already-aborted tool update must not send a new run");
+  assert.equal(aborted.finish.kind, "aborted");
+  assert.equal(cursorSessionCount(), 0);
+  const fresh = user("NEW INTENT ONLY");
+  const r2 = await call(adapter, [fresh]);
+  await call(adapter, [fresh, r2.assistant, toolResult("abort-2", "new evidence")], { tools: [readTool, xTool] });
+  assert.doesNotMatch(sentText(cursor.sends[2]), /ABORTED OLD INTENT|old evidence/);
+  assert.equal(turnSnapshot(cursor.sends[2]).messages[0].content[0].text, "NEW INTENT ONLY");
+  assert.equal(cursor.created.length, 2);
+});
+
+test("preserve turn: abort during the cancellation handshake prevents the replacement send", async () => {
+  const controller = new AbortController();
+  const cursor = fakeCursor(async function* (ctx) {
+    await ctx.callTool("read", {}, "cancel-handshake");
+    yield say("stale");
+  });
+  const adapter = adapterFor({ createAgent: async (options: any) => {
+    const agent = await cursor.createAgent(options);
+    return { ...agent, send: async (msg: any, sendOptions?: any) => {
+      const run = await agent.send(msg, sendOptions);
+      return { ...run, cancel: async () => { controller.abort(); await run.cancel(); } };
+    } };
+  } });
+  const u = user("直接git blam不行吗");
+  const r1 = await call(adapter, [u]);
+  const r2 = await call(adapter, [u, r1.assistant, toolResult("cancel-handshake", "Josip ba697c8")], { tools: [readTool, xTool], signal: controller.signal });
+  assert.equal(r2.finish.kind, "aborted");
+  assert.equal(cursor.sends.length, 1, "abort after cancel must not launch the recovery run");
+  assert.equal(cursorSessionCount(), 0);
+});
+
+for (const status of ["cancelled", "error"]) {
+  test(`preserve turn: terminal SDK ${status} clears recovery state`, async () => {
+    let n = 0;
+    const cursor = fakeCursor(async function* (ctx) {
+      if (++n === 1) { await ctx.callTool("read", {}, "terminal"); yield say("stale"); }
+      else if (n === 2) ctx.setStatus({ status, error: { message: "synthetic failure" } });
+      else yield say("new answer");
+    });
+    const adapter = adapterFor(cursor);
+    const u = user("OLD TERMINAL INTENT");
+    const r1 = await call(adapter, [u]);
+    const r2 = await call(adapter, [u, r1.assistant, toolResult("terminal", "old output")], { tools: [readTool, xTool] });
+    assert.equal(r2.finish.kind, status === "cancelled" ? "aborted" : "error");
+    assert.equal(cursorSessionCount(), 0);
+    await call(adapter, [user("NEW ONLY")]);
+    assert.doesNotMatch(sentText(cursor.sends[2]), /OLD TERMINAL INTENT|old output/);
+    assert.equal(cursor.created.length, 2);
+  });
+}
+
+// Independently authored review regressions (not model-behavior assertions).
+test('independent: removing the last forwarded tool explicitly overrides SDK creation-time tools', async () => {
+ let n=0;const cursor=fakeCursor(async function*(ctx){
+  if(++n===1){await ctx.callTool('read',{},'last-tool');yield say('stale')}
+  else yield say('no tools now')
+ });const adapter=adapterFor(cursor);const u=user('inspect only, do not write');
+ const r1=await call(adapter,[u]);
+ await call(adapter,[u,r1.assistant,toolResult('last-tool','read-only evidence')],{tools:[]});
+ assert.deepEqual(cursor.sendOpts[1]?.local?.customTools,{},'SDK uses send.local.customTools ?? agent.options.local.customTools; omission restores removed tools');
+ assert.equal(turnSnapshot(cursor.sends[1]).messages[0].content[0].text,'inspect only, do not write');
+});
+
+test('independent: schema-only change replays request, tool arguments and evidence unchanged', async()=>{
+ let n=0;const cursor=fakeCursor(async function*(ctx){if(++n===1){await ctx.callTool('read',{path:'history'},'schema');yield say('stale')}else yield say('answer')});
+ const adapter=adapterFor(cursor);const u=user('who introduced these two lines?');const r=await call(adapter,[u]);
+ const changed={...readTool,parameters:{type:'object',properties:{file_path:{type:'string'}}}};
+ await call(adapter,[u,r.assistant,toolResult('schema','author: fixture')],{tools:[changed]});
+ const s=turnSnapshot(cursor.sends[1]);assert.equal(s.messages[0].content[0].text,'who introduced these two lines?');
+ assert.deepEqual(s.messages[1].content.find((b:any)=>b.type==='toolCall').arguments,{path:'history'});
+ assert.equal(s.messages[2].content[0].text,'author: fixture');assert.deepEqual(cursor.sendOpts[1].local.customTools.read.inputSchema,changed.parameters);
+});
+
+test('independent: two pending host sessions keep replay intent and image bytes separate', async()=>{
+ const cursor=fakeCursor(async function*(ctx){if(!sentText(ctx.msg).startsWith('[Host turn replay:')){await ctx.callTool('read',{},'same-call-id');yield say('stale')}else yield say('answer')});
+ const adapter=adapterFor(cursor,{readImage:async(ref:any)=>({data:'bytes-'+ref.attachmentId,mimeType:'image/png'})});
+ const a={...user('A private request'),content:[...text('A private request'),{type:'image',attachment:{attachmentId:'A-image',path:'/fixture/A.png'}}]};
+ const b={...user('B unrelated request'),content:[...text('B unrelated request'),{type:'image',attachment:{attachmentId:'B-image',path:'/fixture/B.png'}}]};
+ const ra=await call(adapter,[a],{sessionId:'A'});const rb=await call(adapter,[b],{sessionId:'B'});
+ await call(adapter,[a,ra.assistant,toolResult('same-call-id','A evidence')],{sessionId:'A',tools:[readTool,xTool]});
+ await call(adapter,[b,rb.assistant,toolResult('same-call-id','B evidence')],{sessionId:'B',tools:[readTool,xTool]});
+ assert.doesNotMatch(sentText(cursor.sends[2]),/B unrelated|B evidence/);assert.doesNotMatch(sentText(cursor.sends[3]),/A private|A evidence/);
+ assert.deepEqual(cursor.sends[2].images,[{data:'bytes-A-image',mimeType:'image/png'}]);assert.deepEqual(cursor.sends[3].images,[{data:'bytes-B-image',mimeType:'image/png'}]);
+});
+
+test('independent: explicit close/reset drops the open intent before same-key reuse', async()=>{
+ let n=0;const cursor=fakeCursor(async function*(ctx){if(++n<=2){await ctx.callTool('read',{},'reset-'+n);yield say('stale')}else yield say('answer')});
+ const adapter=adapterFor(cursor);await call(adapter,[user('OLD CLOSED REQUEST')]);closeAllCursorSessions();
+ const u=user('NEW REQUEST');const r=await call(adapter,[u]);await call(adapter,[u,r.assistant,toolResult('reset-2','new result')],{tools:[readTool,xTool]});
+ assert.doesNotMatch(sentText(cursor.sends[2]),/OLD CLOSED REQUEST/);assert.equal(turnSnapshot(cursor.sends[2]).messages[0].content[0].text,'NEW REQUEST');assert.equal(cursor.created.length,2);
 });
